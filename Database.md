@@ -520,7 +520,7 @@
     - Create Table Code
         
         ```sql
-         CREATE TABLE dbo.class (
+        CREATE TABLE dbo.class (
             -- 課程序號 (主鍵)
             class_sn            INT             IDENTITY(1,1) NOT NULL,
             -- 1. 先定義計算資料行與 PERSISTED
@@ -531,7 +531,7 @@
             -- 課程名稱
             class_name          NVARCHAR(100)   NULL,
             -- 標籤顏色
-            class_label_color   NVARCHAR(20)    NULL,
+            class_label_color   NVARCHAR(200)    NULL,
             -- 課程時長
             class_duration      INT             NULL,
             -- 是否免費 (0: 否, 1: 是)
@@ -553,6 +553,29 @@
             -- 定義主鍵
             CONSTRAINT PK_class PRIMARY KEY (class_sn),
         );
+        
+        INSERT INTO dbo.class (
+            class_name, 
+            class_label_color, 
+            class_duration, 
+            class_is_free, 
+            class_default_instructor_id, 
+            class_default_instructor_name, 
+            class_is_active, 
+            class_type, 
+            class_create_pn,  
+            class_up_pn
+        )
+        VALUES 
+            (N'基礎重量訓練', '#FF5733', 60, 0, 'U0000000001', N'管理員1', 1, N'重訓', 'Admin', 'Admin'),
+            (N'極限燃脂拳擊', '#C70039', 50, 0, 'U0000000002', N'老師小美', 1, N'有氧', 'Admin', 'Admin'),
+            (N'舒緩陰瑜珈', '#DAF7A6', 90, 1, 'U0000000001', N'管理員1', 1, N'瑜珈', 'Admin', 'Admin'),
+            (N'核心皮拉提斯', '#581845', 60, 0, 'U0000000003', N'老師小愛', 1, N'核心', 'Admin', 'Admin'),
+            (N'進階健體專班', '#2ECC71', 120, 0, 'U0000000002', N'老師小美', 0, N'重訓', 'Admin', 'Admin'),
+            (N'攀岩協調性訓練', '#2ECC71', 80, 0, 'U0000000006', N'老師1', 1, N'協調', 'Admin', 'Admin'),
+            (N'臀大肌推舉訓練', '#FF5733', 30, 0, 'U0000000006', N'老師1', 1, N'重訓', NULL, NULL);
+        
+        SELECT *  FROM class
         
         -- 請確保 dbo.users 表中已經存在這些 usr_id
         INSERT INTO dbo.class (
@@ -603,7 +626,7 @@
             cls_scdle_rules_seq INT IDENTITY(1,1) NOT NULL,
             -- 👇 對外業務編號
             cls_scdle_rules_sn AS (
-                'SCH' + RIGHT('000000000' + CAST(cls_scdle_rules_seq AS VARCHAR(10)), 10)
+                'SCHR' + RIGHT('000000000' + CAST(cls_scdle_rules_seq AS VARCHAR(10)), 10)
             ) PERSISTED,
             
             -- 關聯到 class 表
@@ -655,7 +678,9 @@
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
-    | **`cls_scdle_rules_sn`** | Primary Key | 規則唯一編號 | 1 |
+    | **`cls_scdle_rule_seq`** | Primary Key 
+    int | 資料庫序號 |  |
+    | **`cls_scdle_rules_sn`** | varChar | 規則唯一編號 | SCHR00000001 |
     | **`class_id`** | varchar(15) | 關聯到 `class`表 | CLS000004 |
     | **`cls_scdle_rules_day_wk`** | Int | 星期幾 (1-7 ) | 1 (週一) |
     | **`cls_scdle_rules_st`** | Time | 開始時間 (不含日期) | 09:00:00 |
@@ -672,25 +697,25 @@
         CREATE TABLE dbo.cls_scdle_arnge (
             -- 排課流水號 (主鍵，自動遞增)
             cls_scdle_arnge_sn              INT             IDENTITY(1,1) NOT NULL,
-            
+           
             -- 獨立日期欄位 (往上移，讓下方的 ID 可以取用它)
             cls_scdle_date                  DATE            NOT NULL,
             
             -- 唯一ID (由資料庫自動計算：CLS + YYYYMMDD + 7碼流水號)
             cls_scdle_arnge_id AS (
-                'CLS' + 
+                'CLSA' + 
                 CONVERT(VARCHAR(8), cls_scdle_date, 112) + 
                 RIGHT(REPLICATE('0', 7) + CAST(cls_scdle_arnge_sn AS VARCHAR(7)), 7)
             ) PERSISTED,
             
             -- 關聯到 class 表
-            class_id                        VARCHAR(15)     NOT NULL,
+            class_id                        VARCHAR(15)     NULL,
             
             -- 課程名稱快照
             class_name                      NVARCHAR(100)   NULL,
             
             -- 標籤顏色快照
-            class_label_color               NVARCHAR(20)    NULL,
+            class_label_color               NVARCHAR(200)   NULL,
             
             -- 這堂課當前的指導老師，關聯到 users
             cls_scdle_arnge_instructor_id   VARCHAR(21)     NULL, 
@@ -705,20 +730,24 @@
             cls_scdle_arnge_et              DATETIME        NOT NULL,
             
             -- 該課程狀態 (Cancel, Open, Ongoing, Finished)
-            cls_scdle_status                VARCHAR(50)     NOT NULL CONSTRAINT DF_cls_scdle_arnge_status DEFAULT ('Open'),
+            cls_scdle_status                VARCHAR(50)     NULL,
             
+            -- 該堂課是否免費 (預設為和課程定義一樣)
+            cls_scdle_arnge_is_free         BIT             NOT NULL,
+              
             -- 課程目前異動/新增來源 (Auto, Manual)
-            cls_scdle_source                VARCHAR(20)     NOT NULL CONSTRAINT DF_cls_scdle_arnge_source DEFAULT ('Auto'),
+            cls_scdle_source                VARCHAR(20)     NULL,
             
             -- 關聯到 cls_scdle_rules 用Soft reference
-            cls_scdle_rules_sn              INT             NULL,
+            cls_scdle_rules_sn              VARCHAR(40)     NULL,          
             
             -- 建立時間 (預設為當前時間)
             cls_scdle_arnge_create_dt       DATETIME        NOT NULL CONSTRAINT DF_cls_scdle_arnge_create_dt DEFAULT (GETDATE()),
             
             -- 更新時間 (預設為當前時間)
-            cls_scdle_arnge_up_dt           DATETIME        NOT NULL CONSTRAINT DF_cls_scdle_arnge_up_dt DEFAULT (GETDATE()),
-        
+            cls_scdle_arnge_up_dt           DATETIME        NULL CONSTRAINT DF_cls_scdle_arnge_up_dt DEFAULT (GETDATE()),
+            
+                 
             -- 定義主鍵
             CONSTRAINT PK_cls_scdle_arnge PRIMARY KEY (cls_scdle_arnge_sn),
             
@@ -736,40 +765,41 @@
             instructor_name, 
             cls_scdle_arnge_st, 
             cls_scdle_arnge_et, 
-            cls_scdle_status, 
+            cls_scdle_status,
+            cls_scdle_arnge_is_free, 
             cls_scdle_source, 
             cls_scdle_rules_sn
         )
         VALUES 
         -- 實例 1：來自規則 1 (週一)。狀態: 已結束 (Finished)
         ('2026-05-18', 'CLS000001', N'基礎重量訓練', '#FF5733', 'U0000000001', N'管理員1', 
-         '2026-05-18 09:00:00', '2026-05-18 10:00:00', 'Finished', 'Auto', 1),
+         '2026-05-18 09:00:00', '2026-05-18 10:00:00', 'Finished', '0', 'Auto', 'SCHR0000000001'),
         
         -- 實例 2：來自規則 2 (週三)。注意：原本是老師小美，這邊假設因為請假換成老師1來代課，狀態: 開放中 (Open)
         ('2026-05-20', 'CLS000002', N'極限燃脂拳擊', '#C70039', 'U0000000006', N'老師1', 
-         '2026-05-20 18:30:00', '2026-05-20 19:20:00', 'Open', 'Auto', 2),
+         '2026-05-20 18:30:00', '2026-05-20 19:20:00', 'Open', '0', 'Auto', 'SCHR0000000002'),
         
         -- 實例 3：來自規則 3 (週五)。狀態: 開放中 (Open)
         ('2026-05-22', 'CLS000003', N'舒緩陰瑜珈', '#DAF7A6', 'U0000000001', N'管理員1', 
-         '2026-05-22 20:00:00', '2026-05-22 21:30:00', 'Open', 'Auto', 3),
+         '2026-05-22 20:00:00', '2026-05-22 21:30:00', 'Open', '1', 'Auto', 'SCHR0000000003'),
         
         -- 實例 4：手動加開 (Manual)。沒有對應規則 (rules_sn = NULL)。狀態: 取消 (Cancel)
         ('2026-05-24', 'CLS000007', N'臀大肌推舉訓練', '#FF5733', 'U0000000006', N'老師1', 
-         '2026-05-24 14:00:00', '2026-05-24 14:30:00', 'Cancel', 'Manual', NULL);
+         '2026-05-24 14:00:00', '2026-05-24 14:30:00', 'Cancel', '0', 'Manual', NULL);
         ```
         
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
     | **`cls_scdle_arnge_sn`** |  | 排課流水號 |  |
-    | **`cls_scdle_arnge_id`** |  | 唯一ID，CLS+西元年+月份+日期+**`cls_scdle_arnge_sn`** 向左補7個0 |  |
+    | **`cls_scdle_date`**  | DATE | 獨立日期欄位，方便以「天」為單位查詢 |  |
+    | **`cls_scdle_arnge_id`** |  | 唯一ID，CLSA+西元年+月份+日期+**`cls_scdle_arnge_sn`** 向左補7個0 |  |
     | **`class_id`** | varchar(15) | 關連到**`class`** 表 |  |
     | **`class_name`** | NVARCHAR(100) | 課程名稱快照 |  |
     | **`class_label_color`** | nvarchar(20) | 標籤顏色快照 |  |
     | **`cls_scdle_arnge_instructor_id`** | varChar(21) | 這堂課當前的指導老師
     關連到**`users`** |  |
     | **`instructor_name`** | nvarchar(50) | 授課老師名字快照 |  |
-    | **`cls_scdle_date`**  | DATE | 獨立日期欄位，方便以「天」為單位查詢 |  |
     | **`cls_scdle_arnge_st`** | DateTime | 課程開始時間 |  |
     | **`cls_scdle_arnge_et`** | DateTime | 課程結束時間 |  |
     | **`cls_scdle_status`** | varchar(50) | 該課程狀態
@@ -777,10 +807,11 @@
       • **`Open`
       • `Ongoing`
       • `Finished`** |  |
+    | **`cls_scdle_arnge_is_free`** | bool | 該堂課是否為免費 |  |
     | **`cls_scdle_source`** | varchar(20) | 課程目前異動/新增來源
       • `Auto`
       • `Manual` |  |
-    | **`cls_scdle_rules_sn`** |  | 關連到`cls_scdle_rules`
+    | **`cls_scdle_rules_sn`** | varchar | 關連到`cls_scdle_rules`
     用Soft reference |  |
     | **`cls_scdle_arnge_create_dt`** | datetime | 建立時間 |  |
     | **`cls_scdle_arnge_up_dt`** | datetime | 更新時間 |  |
