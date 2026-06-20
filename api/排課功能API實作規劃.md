@@ -19,17 +19,17 @@
 1. **`[GET] /api/v1/schedule-rules`**
 2. **`[POST] /api/v1/schedule-rules`**
 3. **`[POST] /api/v1/schedule-rules/{ruleSn}`**
-4. `[DELETE] /api/v1/schedule-rules/{ruleSn}`
-5. `[POST] /api/v1/schedule-rules/generate-sessions`
+4. `[POST] /api/v1/schedule-rules/{ruleSn}/delete`
+5. **`[POST] /api/v1/schedule-rules:generate-sessions(邏輯已併入 schedule/week API)`**
 - Sessions
-1. `[GET] /api/v1/schedule-sessions`
-2. `[GET] /api/v1/schedule-sessions/{arrangeSn}`
-3. `[POST] /api/v1/schedule-sessions`
-4. `[POST] /api/v1/schedule-sessions/{arrangeSn}`
-5. `[POST] /api/v1/schedule-sessions/{arrangeSn}/cancel`
-6. `[POST] /api/v1/schedule-sessions/{arrangeSn}/status`
+1. [**[GET] /api/v1/admin/schedule-session/week**](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
+2. [**`[GET] /api/v1/schedule-sessions/{arrangeSn}](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)(目前不需要取得單堂課程資訊邏輯)`**
+3. [**`[POST] /api/v1/schedule-sessions`**](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
+4. [**[POST] /api/v1/admin/schedule-session/{arrangeId}**](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
+5. [**[POST] /api/v1/admin/schedule-session/{arrangeId}/cancel**](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
+6. `[POST] /api/v1/schedule-sessions/{arrangeId}/status`
 - Logs
-1. `[GET] /api/v1/schedule-sessions/{arrangeSn}/logs`
+1. `[GET] /api/v1/schedule-sessions/{arrangeId}/logs`
 2. `[GET] /api/v1/schedule-logs`
 
 ## 命名與分層建議
@@ -153,7 +153,7 @@
 - 失敗情境
     - 課程不存在、老師不存在、衝堂、欄位格式錯誤。
 
-### 3) `[DELETE] /api/v1/schedule-rules/{ruleSn}`
+### 3) `[POST] /api/v1/schedule-rules/{ruleSn}/delete`
 
 - 目的
     - 實際刪除（Hard Delete）規則。
@@ -161,25 +161,13 @@
     - 檢查該規則是否存在。
     - 檢查是否有「未來」已展開的課程實例關聯到此 `ruleSn`（視業務邏輯決定是否允許刪除）。
 - Infrastructure SQL
-    - 建議作法 A（保留歷史，切斷關聯）：
-    先執行 `UPDATE cls_scdle_arnge SET ruleSn = NULL WHERE ruleSn = @ruleSn;`
-    再執行 `DELETE FROM cls_scdle_rules WHERE cls_scdle_rules_sn=@ruleSn;`
-    - 建議作法 B（嚴格阻擋）：
-    若查到該規則已被 `cls_scdle_arnge` 使用，回傳 `409 Conflict` 錯誤，提示使用者必須先取消關聯的課程才能刪除模板。
+    - hard delete
 
-### 4) `[POST] /api/v1/schedule-rules/{ruleSn}/deactivate`
-
-- 目的
-    - Soft delete 規則。
-- SQL
-    - `UPDATE cls_scdle_rules SET cls_scdle_rules_is_active=0 WHERE cls_scdle_rules_sn=@ruleSn`。
-- 注意
-    - 不回頭刪既有 session；規則停用只影響未來生成。
-
-### 5) `[POST] /api/v1/schedule-rules/generate-sessions`
+### 4) `[POST] /api/v1/schedule-rules:generate-sessions`
 
 - 目的
     - 依啟用規則，批次展開日期區間的課程實例（Auto）。
+    - 目前實作在 API
 - Request
 
 ```json
@@ -202,25 +190,113 @@
 - 回傳
     - `createdCount, skippedCount, conflictCount`。
 
-### 6) `[GET] /api/v1/schedule-sessions`
+### 6) [[GET] /api/v1/admin/schedule-session/week](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
 
 - 目的
-    - 查詢實際課表（週/月行事曆）。
-- Query
-    - `fromDate, toDate, status, instructorId, classId, source`。
+    - 取得某一週的所有實際課表。
+    - 如果查的當週沒有任何排過的課，會從模板課程先建立實體課表，再取。
+- trigger timing
+    - 在Class&Schedule page 的Edit mode:
+        1. 畫面載入當週課程
+        2. 按上/下一週時觸發。
+- parameter
+    
+    
+    | Parameter | Type | Required | Description | Example |
+    | --- | --- | --- | --- | --- |
+    | weekstart | string (yyyy-MM-dd) | Yes | 查詢週排班的起始日期 | 2026-06-08 |
 - SQL
     - 主查 `cls_scdle_arnge`，依條件過濾、`ORDER BY cls_scdle_arnge_st`。
-- 回傳欄位
-    - `arrangeSn, arrangeId, date, classId, className, color, instructorId, instructorName, startAt, endAt, status, source, ruleSn`。
+- Response
+    
+    ```json
+    {
+        "weekStart": "2026-06-01",
+        "weekEnd": "2026-06-07",
+        "source": "TEMPLATE",
+        "created": true,
+        "sessions": [
+            {
+                "sessionId": "CLSA202606010000005",
+                "scheduleId": "SCHR0000000001",
+                "date": "2026-06-01",
+                "dayOfWeek": 1,
+                "startTime": "09:00",
+                "endTime": "10:00",
+                "classDefId": "CLS000001",
+                "className": "基礎重量訓練",
+                "instructorId": "U000000001",
+                "instructorName": "管理員1",
+                "duration": 60,
+                "color": "#FF5733",
+                "isFree": false,
+                "status": "Open",
+                "source": "Auto"
+            },
+            {
+                "sessionId": "CLSA202606030000006",
+                "scheduleId": "SCHR0000000002",
+                "date": "2026-06-03",
+                "dayOfWeek": 3,
+                "startTime": "18:30",
+                "endTime": "19:20",
+                "classDefId": "CLS000002",
+                "className": "極限燃脂拳擊",
+                "instructorId": "U0000000002",
+                "instructorName": "老師小美",
+                "duration": 50,
+                "color": "#C70039",
+                "isFree": false,
+                "status": "Open",
+                "source": "Auto"
+            },
+            {
+                "sessionId": "CLSA202606050000007",
+                "scheduleId": "SCHR0000000003",
+                "date": "2026-06-05",
+                "dayOfWeek": 5,
+                "startTime": "20:00",
+                "endTime": "21:30",
+                "classDefId": "CLS000003",
+                "className": "舒緩陰瑜珈",
+                "instructorId": "U0000000001",
+                "instructorName": "管理員1",
+                "duration": 90,
+                "color": "#DAF7A6",
+                "isFree": true,
+                "status": "Open",
+                "source": "Auto"
+            },
+            {
+                "sessionId": "CLSA202606060000008",
+                "scheduleId": "SCHR0000000004",
+                "date": "2026-06-06",
+                "dayOfWeek": 6,
+                "startTime": "10:00",
+                "endTime": "11:10",
+                "classDefId": "CLS000004",
+                "className": "核心皮拉提斯",
+                "instructorId": "U0000000003",
+                "instructorName": "老師小愛",
+                "duration": 70,
+                "color": "#581845",
+                "isFree": false,
+                "status": "Open",
+                "source": "Auto"
+            }
+        ]
+    }
+    ```
+    
 
-### 7) `[GET] /api/v1/schedule-sessions/{arrangeSn}`
+### 7) [`[GET] /api/v1/schedule-sessions/{arrangeSn}`](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
 
 - 目的
     - 取得單堂課詳細資訊。
 - SQL
     - `SELECT TOP 1 ... FROM cls_scdle_arnge WHERE cls_scdle_arnge_sn=@arrangeSn`。
 
-### 8) `[POST] /api/v1/schedule-sessions`
+### 8) [`[POST] /api/v1/schedule-sessions`](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
 
 - 目的
     - 手動加開課程（Manual）。
@@ -233,7 +309,7 @@
   "instructorId": "U0000000006",
   "startAt": "2026-06-15T14:00:00",
   "endAt": "2026-06-15T14:30:00",
-  "remark": "活動加開"
+  "remark": "活動加開" // 目前沒有這個
 }
 ```
 
@@ -244,10 +320,10 @@
 - Infrastructure SQL
     - Insert 到 `cls_scdle_arnge`，固定 `source='Manual'`，`ruleSn=NULL`。
 
-### 9) `[POST] /api/v1/schedule-sessions/{arrangeSn}`
+### 9) [[POST] /api/v1/schedule-sessions/{arrangeId}](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
 
 - 目的
-    - 修改單堂課（時間、老師、狀態）。
+    - 修改單堂課（時間、老師、狀態、）。
 - 交易要求
     - 必須同交易寫入 `cls_scdle_arnge` + `cls_scdle_arnge_log`。
 - Application 流程
@@ -264,7 +340,7 @@
 }
 ```
 
-### 10) `[POST] /api/v1/schedule-sessions/{arrangeSn}/cancel`
+### 10) [[POST] /api/v1/schedule-sessions/{arrangeId}/cancel](https://app.notion.com/p/API-3610ef2839da809892dfefb089fec332?pvs=21)
 
 - 目的
     - 取消課程（狀態改 `Cancel`）。
@@ -272,7 +348,7 @@
     - 重用 Update handler 的狀態更新邏輯。
     - 寫入 log（old: Open/new: Cancel）與 remark。
 
-### 11) `[POST] /api/v1/schedule-sessions/{arrangeSn}/status`
+### 11) `[POST] /api/v1/schedule-sessions/{arrangeId}/status`
 
 - 目的
     - 單獨切換狀態（Open/Ongoing/Finished/Cancel）。
@@ -284,7 +360,7 @@
 - 交易
     - 更新 session + log。
 
-### 12) `[GET] /api/v1/schedule-sessions/{arrangeSn}/logs`
+### 12) `[GET] /api/v1/schedule-sessions/{arrangeId}/logs`
 
 - 目的
     - 取得該堂課完整異動歷程。
