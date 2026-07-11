@@ -231,7 +231,7 @@
       • `Ticket` 
       • `Product`  |  |
     | `order_items_ref_id` | varChar | 訂單種類編號
-      • 票券→`ticket_plan_kind_sn`     
+      • 票券→`ticket_plan_kind_code`     
       • 商品 → `product_id` |  |
     | `order_items_payment_state` | Enum | 付款狀態
       • `Paid`
