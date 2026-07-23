@@ -5,34 +5,36 @@
     - Create Table Code
         
         ```sql
-        CREATE TABLE [users] (
-            -- 1. 建立自增數字，這才是真正的 Primary Key
-            [usr_no] INT IDENTITY(1,1) NOT NULL, 
-            
-            -- 2. 建立計算欄位 (Computed Column)
-            -- PERSISTED 表示資料會實體儲存在硬碟，這樣才能建立索引並提高查詢速度
-            [usr_id] AS ('U' + RIGHT(REPLICATE('0', 10) + CAST([usr_no] AS VARCHAR(10)), 10)) PERSISTED,
-            
-            [usr_name] NVARCHAR(50) NOT NULL,
-            [usr_phone] VARCHAR(20) NOT NULL,
-            // 1:啟用, 0:不啟用
-            [usr_active] BIT DEFAULT 1,
-            [usr_create_dt] DATETIME DEFAULT GETDATE(),
+        CREATE TABLE dbo.users
+        (
+            usr_no INT IDENTITY(1,1) NOT NULL,
         
-            -- 設定 PK 與唯一約束
-            CONSTRAINT [PK_Users] PRIMARY KEY ([usr_no]),
-            CONSTRAINT [UQ_User_Id] UNIQUE ([usr_id])
+            usr_id AS (
+                'U' + RIGHT(REPLICATE('0', 10)
+                + CAST(usr_no AS VARCHAR(10)), 10)
+            ) PERSISTED,
+        
+            usr_name      NVARCHAR(50) NOT NULL,
+            usr_phone     VARCHAR(20)  NOT NULL,
+            usr_pwd       VARCHAR(255) NOT NULL,
+            usr_active    BIT NOT NULL
+                CONSTRAINT DF_users_active DEFAULT (1),
+            usr_create_dt DATETIME2(0) NOT NULL
+                CONSTRAINT DF_users_create_dt DEFAULT (SYSDATETIME()),
+        
+            CONSTRAINT PK_users PRIMARY KEY (usr_no),
+            CONSTRAINT UQ_users_id UNIQUE (usr_id),
+            CONSTRAINT UQ_users_phone UNIQUE (usr_phone)
         );
-        
-        INSERT INTO [Users] ([usr_name], [usr_phone], [usr_active])
+        INSERT INTO dbo.users (usr_name, usr_phone, usr_pwd, usr_active, usr_create_dt)
         VALUES
-        (N'管理員1', '0900000000', 1),
-        (N'老師小美', '0911111111', 1),
-        (N'老師3',   '0922222222', 1),
-        (N'學生小靖', '0933333333', 1),
-        (N'學生喵喵', '0944444444', 1),
-        (N'老師1',   '0912345678', 1),
-        (N'老師2',   '0922111222', 1);
+            (N'管理員1', '0900000000', '0900000000', 1, '2026-05-01 20:04:27.780'),
+            (N'老師小美', '0911111111', '0911111111', 1, '2026-05-01 20:04:27.780'),
+            (N'老師小愛', '0922222221', '0922222221', 1, '2026-05-01 20:04:27.780'),
+            (N'學生小靖', '0933333333', '0933333333', 1, '2026-05-01 20:04:27.780'),
+            (N'學生喵喵', '0944444444', '0944444444', 1, '2026-05-01 20:04:27.780'),
+            (N'老師1',  '0912345678', '0912345678', 1, '2026-05-01 20:04:27.780'),
+            (N'老師2',  '0922111222', '0922111222', 1, '2026-05-01 20:04:27.780');
         ```
         
     
@@ -46,7 +48,7 @@
     | `usr_pwd`  | varChar | 使用者密碼
     唯一，目前都是用手機號碼
     admin →0900000000 |  |
-    | `usr_name` | Text | 學生姓名 | 王小明 |
+    | `usr_name` | Text | 姓名 | 王小明 |
     | `usr_phone` | Text | 聯絡電話 | 0912345678 |
     | `usr_create_dt` | DateTime | 建立時間 | 2025-11-01 |
 - 角色表 **`bmc_role`**
@@ -148,9 +150,9 @@
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
     | `pass_id` | Primary Key | 學生票券流水號 |  |
-    | `order_items_sn` | Foreign Key | 關聯到訂單明細表 |  |
-    | `orders_sn` | Foreign Key | 關聯到訂單表(主表) |  |
-    | `owner_id` | Foreign Key | 和`users.usr_id`對應 | C00001 |
+    | `order_items_sn` | 關聯邏輯 | 關聯到訂單明細表 |  |
+    | `orders_sn` | 邏輯關聯 | 關聯到訂單表(主表) |  |
+    | `owner_id` | 邏輯關聯 | 和`users.usr_id`對應 | C00001 |
     | `valid_status` | Text | 啟用狀態:
     `UnActive`(未啟用)
     `Active`(啟用中)
@@ -161,7 +163,7 @@
     | `valid_edate` | DateTime | **票券到期日** |  |
     | 堂票(Pack) 專用欄位 |  |  |  |
     | `credits_total` | int | 購買總堂數 | 10 |
-    | `credits_remaing` | int | 剩餘堂數 | 9 |
+    | `credits_remaining` | int | 剩餘堂數 | 9 |
 - 學生出席課程紀錄表 `sdt_att_record`
     - 資料新增條件: 從三叉機傳送進入的紀錄過10min 後都沒有出去的紀錄。
     
@@ -201,13 +203,72 @@
     | `rem_credits_snapshot` | Int | (保命欄位) 核銷後的剩餘堂數快照 | 9 |
     | `operator_id` | VarChar | 操作者 ID（閘門進場可存 System） | admin_01 |
     | `remark` | Text | 備註 | 逾時未進場補發、或手動扣點說明 |
-- 訂單表 `orders`
-    
+- 訂單表 **`orders`**
+    - Create Table
+        
+        ```sql
+        CREATE TABLE dbo.orders (
+            -- 1. 實體主鍵 (提高查詢效能)
+            orders_sn INT IDENTITY(1,1) NOT NULL,
+            
+            -- 2. 購買日期 (不可為空)
+            order_buy_date DATETIME NOT NULL CONSTRAINT DF_orders_buy_date DEFAULT (GETDATE()),
+            
+            -- 3. 程式中使用的訂單編號 (計算欄位 ORD + YYYYMMDD + 5碼流水號)
+            orders_id AS (
+                'ORD' + 
+                CONVERT(VARCHAR(8), order_buy_date, 112) + 
+                RIGHT('000000' + CAST(orders_sn AS VARCHAR(6)), 6)
+            ) PERSISTED NOT NULL,
+            
+            -- 4. 購買者資訊 (外鍵與快照)
+            orders_buyer_id VARCHAR(50) NULL,
+            orders_buyer_name NVARCHAR(50) NULL,
+            
+            -- 5. 訂單狀態
+            orders_overall_payment_state VARCHAR(20) NULL,
+                
+            -- 6. 金額欄位 (DECIMAL(10,2) 支援到千萬位數，小數點2位)
+            orders_total_amount DECIMAL(10,2) NOT NULL CONSTRAINT DF_orders_total_amount DEFAULT (0),
+            orders_actual_amount DECIMAL(10,2) NOT NULL CONSTRAINT DF_orders_actual_amount DEFAULT (0),
+            
+            -- 7. 系統操作紀錄
+            orders_create_pn VARCHAR(50) NULL,
+            orders_create_dt DATETIME NOT NULL CONSTRAINT DF_orders_create_dt DEFAULT (GETDATE()),
+            orders_up_pn VARCHAR(50) NULL,
+            orders_up_dt DATETIME NOT NULL CONSTRAINT DF_orders_up_dt DEFAULT (GETDATE()),
+        
+            -- === 設定約束條件 ===
+            CONSTRAINT PK_orders PRIMARY KEY (orders_sn),     -- 設定 orders_sn 為真實 Primary Key
+            CONSTRAINT UQ_orders_id UNIQUE (orders_id)        -- 設定 orders_id 唯一，避免重複
+        );
+        
+        insert into orders
+        (
+        	order_buy_date,
+        	orders_buyer_id,
+        	orders_buyer_name,
+        	orders_overall_payment_state,
+        	orders_total_amount,
+        	orders_actual_amount,
+        	orders_create_dt,
+        	orders_create_pn
+        
+        )
+        values
+        -- 購買月票
+        (GETDATE(), 'U0000000005', '學生喵喵', 'UnPaid', 1960.00, 1960.00, GETDATE(), 'Test')
+        ```
+        
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
-    | `orders_sn` | Primary Key | 訂單流水號 | C0001 |
-    | `orders_buyer` | varChar | 購買者id | `users.usr_id` |
+    | `orders_sn` | Primary Key int | 訂單流水號，數字，增加查詢效能 |  |
+    | `order_buy_date` | DateTime not null | 購買日期 |  |
+    | `orders_id` | not null  | 程式中用這個
+    `ORD` +`YYYYMMDD`+ `orders_sn` (補零到6碼) | YYYYMMdd是購買日期 |
+    | `orders_buyer_id` | varChar | 購買者id | `users.usr_id` |
+    | `orders_buyer_name`  | nvarChar(50) | 查詢快照，購買者名稱 |  |
     | `orders_overall_payment_state` | enum | 訂單總付款狀態
       • `Paid` (全品項付清)
       • `PartialPaid` (部分品項付清)
@@ -215,47 +276,115 @@
       • `Cancel` (取消訂單) |  |
     | `orders_total_amount`  | decimal | 訂單總金額 |  |
     | `orders_actual_amount`  | decimal | 訂單實收總額 |  |
-    | `order_buy_date` | DateaTime | 購買日期 |  |
     | `orders_create_pn` | varChar | 建立訂單的人(當時操作系統的使用者) | `users.usr_id` |
     | `orders_create_dt` | DateTime | 建立該筆訂單的時間 |  |
     | `orders_up_pn` | varChar | 更新該筆訂單的人 | `users.usr_id` |
     | `orders_up_dt` | DateTime | 更新該筆訂單的時間 |  |
-- 訂單明細表 `order_items`
-    
+- 訂單明細表 **`order_items`**
+    - 購買商品或方案數量
+    - Create Table
+        
+        ```sql
+        CREATE TABLE dbo.order_items (
+            order_items_sn INT IDENTITY(1,1) NOT NULL,
+        
+            -- 邏輯關聯 orders.orders_sn，不建立 DB FK
+            orders_sn INT NOT NULL,
+        
+            -- 明細編號日期快照，來自 orders.order_buy_date
+            order_items_buy_date DATETIME NOT NULL,
+        
+            order_items_id AS (
+                'ITM' +
+                CONVERT(VARCHAR(8), order_items_buy_date, 112) +
+                RIGHT('000000' + CAST(order_items_sn AS VARCHAR(6)), 6)
+            ) PERSISTED NOT NULL,
+        
+            order_items_type VARCHAR(20) NOT NULL,
+            order_items_ref_id VARCHAR(50) NOT NULL,
+            order_items_name NVARCHAR(100) NOT NULL,
+        
+            order_items_payment_state VARCHAR(20) NOT NULL,
+            order_items_payment_method VARCHAR(20) NOT NULL,
+        
+            order_items_unit_price DECIMAL(10,2) NOT NULL,
+            order_items_total_amount DECIMAL(10,2) NOT NULL,
+            order_items_actual_amount DECIMAL(10,2) NOT NULL,
+        
+            order_items_quantity INT NOT NULL,
+        
+            bonus_benefit_quantity INT NOT NULL
+                CONSTRAINT DF_order_items_bonus_benefit_quantity DEFAULT (0),
+        
+            bonus_benefit_unit VARCHAR(20) NULL,
+        
+            order_items_create_pn VARCHAR(50) NULL,
+            order_items_create_dt DATETIME NOT NULL
+                CONSTRAINT DF_order_items_create_dt DEFAULT (GETDATE()),
+        
+            order_items_up_pn VARCHAR(50) NULL,
+            order_items_up_dt DATETIME NOT NULL
+                CONSTRAINT DF_order_items_up_dt DEFAULT (GETDATE()),
+        
+            CONSTRAINT PK_order_items
+                PRIMARY KEY (order_items_sn),
+        
+            CONSTRAINT UQ_order_items_id
+                UNIQUE (order_items_id),
+        );
+        
+        CREATE INDEX IX_order_items_orders_sn
+        ON dbo.order_items (orders_sn);
+        ```
+        
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
-    | `order_items_sn` | Primary Key | 訂單品項流水號 |  |
-    | `orders_sn` | Foriegn Key | 訂單流水號 |  |
+    | `order_items_sn` | Primary Key | 訂單明細流水號 DB 內部用 |  |
+    | `orders_sn` | INT NOT NULL, INDEX | 訂單流水號，邏輯關聯 `orders.orders_sn`，不建立 DB FK |  |
+    | `order_items_buy_date` | DateTime not null | 明細編號日期快照，來自`orders`，用於產生 `order_items_id`  |  |
+    | `order_items_id`  | VARCHAR(32) NOT NULL UNIQUE | 訂單明細流水號 對外的code
+    `ITM` + `YYYYMMdd` + `order_items_sn` (補零到6碼) | `YYYYMMdd` 購買日期 |
     | `order_items_type` | Enum | 訂單品項類別
       • `Ticket` 
       • `Product`  |  |
-    | `order_items_ref_id` | varChar | 訂單種類編號
-      • 票券→`ticket_plan_kind_code`     
-      • 商品 → `product_id` |  |
+    | `order_items_ref_id` | varChar | 訂單品項編號
+      • 票券 →`ticket_plan_kind_code`     
+      • 商品 → `products_code` |  |
+    | `order_items_name` | nvarchar | 品項名稱快照 |  |
     | `order_items_payment_state` | Enum | 付款狀態
       • `Paid`
       • `UnPaid`
       • `Cancel` |  |
     | `order_items_payment_method` | Enum | 付款方式
       • 目前會是Cash |  |
+    | `order_items_unit_price` | Decimal | 明細單價快照
+    票券 →`ticket_plan_kind_price` 
+    商品
+    →`product_unit_price`  |  |
     | `order_items_total_amount` | Decimal | 這筆訂單應收的錢 |  |
     | `order_items_actual_amount` | Decimal | 這筆訂單實際收的錢 |  |
     | `order_items_quantity` | int | **品項購買數量**
     票券
-     • 月票 → 單位是天
-     • 堂票 → 單位是堂
-    商品 → 單位是個 |  |
-    | `order_items_bonus_quantity` | int | **訂單品項贈送數量**
+     • 方案票券張數(幾份方案)
+    商品 
+      • 商品數量 |  |
+    | `bonus_benefit_quantity` | int NOT NULL DEFAULT 0 | **額外贈送權益數量**
     票券
-     • 月票 → 單位是天
-     • 堂票 → 單位是堂
-    商品 → 單位是個 |  |
-    | `order_items_buy_date` | DateaTime | 購買日期 |  |
-    | `order_items_create_dt` | DateTime | 建立票券檔案的時間 |  |
+     • 月票 → 天數
+     • 堂票 → 次數
+    商品 
+     • 商品數量 |  |
+    | `bonus_benefit_unit` | varchar(20) nullable
+    bonus_benefit_quantity > 0 時，bonus_benefit_unit 不可為 NULL | **額外贈送權益的單位
+      • `Days` 
+      • `Credits` 
+      • `Pieces`** |  |
+    | `order_items_create_pn` | VarChar(50) | 建立資料的人 | `users.usr_id` |
+    | `order_items_create_dt` | DateTime | 建立該明細資料的時間 |  |
     | `order_items_up_pn` | varChar | 更新檔案的人 | `users.usr_id` |
     | `order_items_up_dt` | DateTime | 更新檔案時間 |  |
-- 訂單通用變更紀錄表 `order_audit_logs`
+- 訂單通用變更紀錄表 **`order_audit_logs`**
     - 利用`batch_id` 「把同一次操作中，產生的多筆欄位改動串在一起」。
         
         當使用者做一次**「付錢」(Pay)**的操作時，系統會改動**多個資料表 / 多個欄位**，因此會產生**多筆 audit log**。這些 log 雖然是不同資料，但都屬於**同一個行為**，所以用**同一個 `batch_id`**來關聯。
@@ -267,10 +396,10 @@
     | **欄位名稱** | **資料型別** | **說明** | **範例** |
     | --- | --- | --- | --- |
     | **`log_sn`** | Primary Key | 紀錄流水號 | 1, 2, 3... |
-    | **`orders_sn`** | **FK (索引)** | 整筆交易的編號（必填，用來快速找出一筆單的所有歷史）。 |  |
+    | **`orders_sn`** | 邏輯關聯 | 整筆交易的編號（必填，用來快速找出一筆單的所有歷史）。 |  |
     | **`batch_id`** | varChar | 該次改動的流水號
     (有可能一次改兩個欄位，所以該欄位可以重複) | C20260313001 |
-    | **`order_items_sn`** | Foreign Key | **(可為空)** 關聯的明細流水號 | ITM_005 (若是改主表則填 NULL) |
+    | **`order_items_sn`** | 邏輯關聯 | **(可為空)** 關聯的明細流水號 | ITM_005 (若是改主表則填 NULL) |
     | **`target_table`** | Varchar | 發生變動的資料表名稱 | `orders` 或 `order_items` |
     | **`target_column`** | Varchar | **變動的欄位名稱** | `payment_state`, `actual_amount` |
     | **`old_value`** | **NVarChar** | 變更前的值（轉成文字儲存） | `Unpaid` 或 `1860` |
@@ -279,7 +408,7 @@
     | **`log_dt`** | DateTime | 紀錄產生的時間 | 2026-03-13 14:00:00 |
     | **`remark`** | Text | 備註（選填） | 學生現場付現、手動折扣 60 元 |
 - 票券種類表 **`ticket_plan_kind`**
-    - 負責分類票券種類
+    - 負責分類票券種類，月票的有效天數、
     - Create Table code
         
         ```sql
@@ -291,10 +420,12 @@
             ticket_plan_kind_cname NVARCHAR(100) NOT NULL,       -- 中文名稱
         
             ticket_plan_kind_price DECIMAL(10,2) NOT NULL,      -- 價格
-            ticket_plan_kind_default_credit INT NOT NULL,       -- 點數
+            ticket_plan_kind_default_credit INT NULL,       -- 額度
             ticket_plan_kind_default_expire_days INT NOT NULL,  -- 有效天數
         
-            ticket_plan_kind_default_is_active varchar(1) NOT NULL     -- 是否啟用
+            ticket_plan_kind_default_is_active varchar(1) NOT NULL,    -- 是否啟用
+            
+        		CONSTRAINT UQ_ticket_plan_kind_code UNIQUE (ticket_plan_kind_code)
         )
         
         INSERT INTO dbo.ticket_plan_kind (
@@ -318,16 +449,16 @@
         ('NEW_PROMO',   'PACK',   '5堂票-新朋友',  1200,  5,   30,  'Y'),
         
         -- 月票系列 (M_PASS)
-        ('MONTHLY',     'M_PASS', '月票',            1960,  99999, 30,  'Y'),
-        ('RENEW',       'M_PASS', '續約票',          1860,  99999, 30,  'Y'),
-        ('B6G1',        'M_PASS', '半年票 買6送1',   11760, 99999, 210, 'Y'),
-        ('B12G2',       'M_PASS', '年票 買12送2',    23520, 99999, 420, 'Y');
+        ('MONTHLY',     'M_PASS', '月票',            1960,  null, 30,  'Y'),
+        ('RENEW',       'M_PASS', '續約票',          1860,  null, 30,  'Y'),
+        ('B6G1',        'M_PASS', '半年票 買6送1',   11760, null, 210, 'Y'),
+        ('B12G2',       'M_PASS', '年票 買12送2',    23520, null, 420, 'Y');
         ```
         
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
-    | `ticket_plan_kind_sn` | nVarChar(PK) | 僅提供資料庫關聯使用 |  |
+    | `ticket_plan_kind_sn` | INT (PK) | 僅提供資料庫關聯使用 |  |
     | `ticket_plan_kind_code` | Enum | 票券代碼，唯一索引，提供工程師在程式碼中調用
       • `SINGLE`(單次)
       • `COUPON`(折抵票)
@@ -365,7 +496,7 @@
     票
       • `B12G2` →買12送2月票
       • `B6G1` →買6送1月票 |  |
-    | `ticket_plan_kind_price` | int | 票券價格
+    | `ticket_plan_kind_price` | Decimal(10,2) | 票券價格
       • `SINGLE`→ 250
       • `MONTHLY`→ 1960
       • `COUPON` → 0
@@ -376,8 +507,8 @@
       • `FREE_TRIAL`→ 0
       • `B12G2` →23520
       • `B6G1` → 11760 |  |
-    | `ticket_plan_kind_default_credit` | Decimal | 預設使用次數
-    月票一律999 |  • `M_PASS`→ 99999
+    | `ticket_plan_kind_default_credit` | INT NULL | 預設使用次數
+    月票一律null |  • `M_PASS`→ null
      • `SINGLE`→ 1
      • `COUPON` → 1
      • `PACK_10`→ 10
@@ -398,7 +529,7 @@
     | `ticket_plan_kind_is_active` | varChar(1) | 是否上架
       • `Y`上架
       • `N`下架不顯示 |  |
-- 規則定義表 `plan_rule`
+- 規則定義表 **`plan_rule`**
     - 定義產品(票券、商品、課程)適用的規則，為了能夠讓前端畫面根據規則顯示可購買的票券。
     - Create Table code
         
@@ -451,7 +582,7 @@
       • `false` 不啟用 |  |
     | `plan_rule_create_dt` | DateTime | 規則建立日期 |  |
     | `plan_rule_up_dt` | DateTime | 規則更新日期 |  |
-- 票券種類規則關聯表 `ticket_plan_kind_rule`
+- 票券種類規則關聯表 **`ticket_plan_kind_rule`**
     - 定義哪一種票券套用哪些規則。一種票券可以適用多個規則；一種規則可以用在多個票券。
     - `ticket_plan_kind_sn` , `ticket_plan_rule_sn` 當複合主鍵。
     - Create Table code
@@ -498,7 +629,7 @@
     | `plan_rule_sn` | VarChar(PK)、FK | 規則種類，必須來自
     `plan_rule.ticket_plan_rule_sn` |  |
     | `ticket_plan_kind_rule_create_dt`  | DateTime | 該規則建立日期 |  |
-- 產品種類表 `products` (目前暫時用不到)
+- 產品種類表 **`products`** (目前暫時用不到)
     
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
@@ -509,7 +640,7 @@
     | **`products_name`** | varChar | 商品名稱 |  |
     | **`products_category`** | Enum | 商品類別
     `Food`, `Equipment` |  |
-    | **`products_price`** | Decimal | 商品價格(定價) |  |
+    | **`products_unit_price`** | Decimal | 商品價格(定價) |  |
     | **`products_stock_qty`** | int  | 商品庫存量 |  |
     | **`products_safety_stock`** | int | 安全庫存量 |  |
     | **`products_is_active`** | boolean | 是否上架 |  |
@@ -891,7 +1022,7 @@
     | **`cls_scdle_arnge_log_dt`** | DateTime | 紀錄產生的時間 | 2026-03-13 14:00:00 |
     | **`cls_scdle_arnge_log_remark`** | Text | 異動原因 (選填)
     保留 |  |
-- 進出紀錄表 `device_record`
+- 進出紀錄表 **`device_record`**
     - 三叉機刷入刷出都會產生這張表
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
