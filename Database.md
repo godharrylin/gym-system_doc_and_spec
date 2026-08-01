@@ -145,15 +145,90 @@
     | `sdt_cur_ticket_expire_dt` | DateTime | 最新一筆票券的到期日 |  |
     | `sdt_cur_ticket_up_dt` | DateTime | 更新時間戳 |  |
 - 學生票券資料表 **`sdt_ticket_pass`**
-    - 學生持有的票券資訊，包括、到期日、使用次數、付款狀態，等使用權利
+    - 學生持有的票券資訊，包括、到期日、使用次數，等使用權利。
+    - `order_items_sn` 不可以唯一 ， 因為可能同一張訂單明細`order_items` 買了一個數量以上的相同方案(`order_items.quantity = 2;` pass A: `PACK_10`。pass B:`PACK_10`)。
+    - ticket_type = PACK 時 credits_total / credits_remaining 不可為 NULL
+    - ticket_type = M_PASS 時 credits_total / credits_remaining 可為 NULL
+    - credits_remaining 不可大於 credits_total
+    - Create Table
+        
+        ```sql
+        CREATE TABLE dbo.sdt_ticket_pass (
+            -- 1. 新增內部實體主鍵流水號 (自動遞增)
+            pass_sn INT IDENTITY(1,1) NOT NULL,
+            
+            -- (為了讓計算欄位可以抓到時間，將 create_dt 移到前面)
+            create_dt DATETIME NOT NULL CONSTRAINT DF_sdt_ticket_pass_create_dt DEFAULT (GETDATE()),
+        
+            -- 2. 外部唯一ID (計算欄位: PASS + YYYYMMDD + 6碼流水號)
+            pass_id AS (
+                'PASS' + 
+                CONVERT(VARCHAR(8), create_dt, 112) + 
+                RIGHT('000000' + CAST(pass_sn AS VARCHAR(6)), 6)
+            ) PERSISTED NOT NULL,
+            
+            -- 關聯到訂單明細表 (不可唯一)
+            order_items_sn INT NOT NULL,
+            
+            -- 關聯到訂單表(主表)
+            orders_sn INT NOT NULL,
+            
+            -- 和 users.usr_id 對應
+            owner_id VARCHAR(21) NOT NULL,
+            
+            -- 票券代碼快照
+            ticket_plan_kind_code NVARCHAR(50) NOT NULL,
+            
+            -- 票券類型快照 (例如 PACK 或 M_PASS)
+            ticket_type NVARCHAR(20) NOT NULL,
+            
+            -- 啟用狀態: UnActive, Active, Expire, Depleted
+            valid_status NVARCHAR(50) NOT NULL,
+            
+            -- 生效日期
+            valid_sdate DATETIME NULL,
+            
+            -- 票券到期日
+            valid_edate DATETIME NULL,
+            
+            -- 購買總堂數
+            credits_total INT NULL,
+            
+            -- 剩餘堂數
+            credits_remaining INT NULL,
+            
+            -- 其他系統欄位
+            create_pn VARCHAR(21) NULL,
+            update_dt DATETIME NULL,
+            update_pn VARCHAR(21) NULL,
+        
+            -- === 設定約束條件 ===
+            
+            -- 1. 設定 Primary Key 為內部流水號，提高查詢與關聯效能
+            CONSTRAINT PK_sdt_ticket_pass PRIMARY KEY (pass_sn),
+            
+            -- 2. 設定對外的 pass_id 為唯一值，確保不重複
+            CONSTRAINT UQ_sdt_ticket_pass_id UNIQUE (pass_id)
+        );
+        
+        -- 建立索引以增加查詢效能
+        CREATE INDEX IX_sdt_ticket_pass_order_items_sn ON dbo.sdt_ticket_pass (order_items_sn);
+        CREATE INDEX IX_sdt_ticket_pass_orders_sn ON dbo.sdt_ticket_pass (orders_sn);
+        CREATE INDEX IX_sdt_ticket_pass_owner_id ON dbo.sdt_ticket_pass (owner_id);
+        ```
+        
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
-    | `pass_id` | Primary Key | 學生票券流水號 |  |
-    | `order_items_sn` | 關聯邏輯 | 關聯到訂單明細表 |  |
-    | `orders_sn` | 邏輯關聯 | 關聯到訂單表(主表) |  |
-    | `owner_id` | 邏輯關聯 | 和`users.usr_id`對應 | C00001 |
-    | `valid_status` | Text | 啟用狀態:
+    | `pass_sn` | Primary Key，int | 學生票券流水號 |  |
+    | `create_dt` | datetime | 建立日期 |  |
+    | `pass_id` | unique | 計算欄位: PASS + YYYYMMDD + 6碼流水號 |  |
+    | `order_items_sn` | 關聯邏輯，不要unique，因為可能一張訂單買兩個相同方案 | 關聯到訂單明細表 |  |
+    | `orders_sn` | 邏輯關聯，int | 關聯到訂單表(主表) |  |
+    | `owner_id` | 邏輯關聯，varchar(21) | 和`users.usr_id`對應 | C00001 |
+    | `ticket_plan_kind_code` | nvarchar(50) | 票券代碼快照，來自`order_items_ref_id` |  |
+    | `ticket_type` | nvarchar(20) | 票券類型快照，方便判斷月票或堂票。來自`ticket_plan_kind_type` |  |
+    | `valid_status` | Text，nvarchar(50) | 啟用狀態:
     `UnActive`(未啟用)
     `Active`(啟用中)
     `Expire`(已過期)
@@ -162,8 +237,12 @@
     | `valid_sdate` | DateTime | **生效日期** |  |
     | `valid_edate` | DateTime | **票券到期日** |  |
     | 堂票(Pack) 專用欄位 |  |  |  |
-    | `credits_total` | int | 購買總堂數 | 10 |
-    | `credits_remaining` | int | 剩餘堂數 | 9 |
+    | `credits_total` | int nullable | 購買總堂數。 | 10 |
+    | `credits_remaining` | int nullable | 剩餘堂數。 | 9 |
+    |  |  |  |  |
+    | `create_pn` | varchar(21) |  |  |
+    | `update_dt` | datetime | 更新日期 |  |
+    | `update_pn` | varchar(21) |  |  |
 - 學生出席課程紀錄表 `sdt_att_record`
     - 資料新增條件: 從三叉機傳送進入的紀錄過10min 後都沒有出去的紀錄。
     
@@ -330,11 +409,31 @@
                 PRIMARY KEY (order_items_sn),
         
             CONSTRAINT UQ_order_items_id
-                UNIQUE (order_items_id),
+                UNIQUE (order_items_id)
         );
         
         CREATE INDEX IX_order_items_orders_sn
         ON dbo.order_items (orders_sn);
+        
+        -- ---- value
+        insert into order_items(
+        	orders_sn ,
+        	order_items_buy_date,
+        	order_items_type,
+        	order_items_ref_id,
+        	order_items_name,
+        	order_items_payment_state,
+        	order_items_payment_method,
+        	order_items_unit_price,
+        	order_items_total_amount,
+        	order_items_actual_amount,
+        	order_items_quantity,
+        	bonus_benefit_quantity,
+        	bonus_benefit_unit,
+        	order_items_create_pn
+          )
+          values
+          (1, '2026-07-16 01:19:19.570', 'Ticket', 'MONTHLY', '月票', 'Paid', 'Cash', '1960.00', '1960.00', '1960.00', '1', 0, null, 'test_id')
         ```
         
     
@@ -343,7 +442,7 @@
     | `order_items_sn` | Primary Key | 訂單明細流水號 DB 內部用 |  |
     | `orders_sn` | INT NOT NULL, INDEX | 訂單流水號，邏輯關聯 `orders.orders_sn`，不建立 DB FK |  |
     | `order_items_buy_date` | DateTime not null | 明細編號日期快照，來自`orders`，用於產生 `order_items_id`  |  |
-    | `order_items_id`  | VARCHAR(32) NOT NULL UNIQUE | 訂單明細流水號 對外的code
+    | `order_items_id` | VARCHAR(32) NOT NULL UNIQUE | 訂單明細流水號 對外的code
     `ITM` + `YYYYMMdd` + `order_items_sn` (補零到6碼) | `YYYYMMdd` 購買日期 |
     | `order_items_type` | Enum | 訂單品項類別
       • `Ticket` 
