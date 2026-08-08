@@ -180,7 +180,7 @@
             ticket_plan_kind_code NVARCHAR(50) NOT NULL,
             
             -- 票券類型快照 (例如 PACK 或 M_PASS)
-            ticket_type NVARCHAR(20) NOT NULL,
+            ticket_plan_kind_type NVARCHAR(20) NOT NULL,
             
             -- 啟用狀態: UnActive, Active, Expire, Depleted
             valid_status NVARCHAR(50) NOT NULL,
@@ -227,7 +227,7 @@
     | `orders_sn` | 邏輯關聯，int | 關聯到訂單表(主表) |  |
     | `owner_id` | 邏輯關聯，varchar(21) | 和`users.usr_id`對應 | C00001 |
     | `ticket_plan_kind_code` | nvarchar(50) | 票券代碼快照，來自`order_items_ref_id` |  |
-    | `ticket_type` | nvarchar(20) | 票券類型快照，方便判斷月票或堂票。來自`ticket_plan_kind_type` |  |
+    | `ticket_plan_kind_type` | nvarchar(20) | 票券類型快照，方便判斷月票或堂票。來自`ticket_plan_kind_type` |  |
     | `valid_status` | Text，nvarchar(50) | 啟用狀態:
     `UnActive`(未啟用)
     `Active`(啟用中)
@@ -350,7 +350,7 @@
     | `orders_buyer_name`  | nvarChar(50) | 查詢快照，購買者名稱 |  |
     | `orders_overall_payment_state` | enum | 訂單總付款狀態
       • `Paid` (全品項付清)
-      • `PartialPaid` (部分品項付清)
+      •  `Refund` (退款)
       • `UnPaid` (未付清)
       • `Cancel` (取消訂單) |  |
     | `orders_total_amount`  | decimal | 訂單總金額 |  |
