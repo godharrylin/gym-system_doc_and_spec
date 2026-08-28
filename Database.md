@@ -233,9 +233,9 @@
     `Active`(啟用中)
     `Expire`(已過期)
     `Depleted` (已用完)
-     | `Active` |
-    | `valid_sdate` | DateTime | **生效日期** |  |
-    | `valid_edate` | DateTime | **票券到期日** |  |
+    `Cancelled` (取消) | `Active` |
+    | `valid_sdate` | DateTime | **票券實際生效日期** |  |
+    | `valid_edate` | DateTime | **票券實際到期日** |  |
     | 堂票(Pack) 專用欄位 |  |  |  |
     | `credits_total` | int nullable | 購買總堂數。 | 10 |
     | `credits_remaining` | int nullable | 剩餘堂數。 | 9 |
@@ -310,7 +310,7 @@
             -- 6. 金額欄位 (DECIMAL(10,2) 支援到千萬位數，小數點2位)
             orders_total_amount DECIMAL(10,2) NOT NULL CONSTRAINT DF_orders_total_amount DEFAULT (0),
             orders_actual_amount DECIMAL(10,2) NOT NULL CONSTRAINT DF_orders_actual_amount DEFAULT (0),
-            
+           
             -- 7. 系統操作紀錄
             orders_create_pn VARCHAR(50) NULL,
             orders_create_dt DATETIME NOT NULL CONSTRAINT DF_orders_create_dt DEFAULT (GETDATE()),
@@ -336,7 +336,7 @@
         )
         values
         -- 購買月票
-        (GETDATE(), 'U0000000005', '學生喵喵', 'UnPaid', 1960.00, 1960.00, GETDATE(), 'Test')
+        (GETDATE(), 'U0000000005', '學生喵喵', 'Paid', 1960.00, 1960.00, GETDATE(), 'Test')
         ```
         
     
@@ -355,7 +355,6 @@
       • `Cancel` (取消訂單) |  |
     | `orders_total_amount`  | decimal | 訂單總金額 |  |
     | `orders_actual_amount`  | decimal | 訂單實收總額 |  |
-    | `orders_create_pn` | varChar | 建立訂單的人(當時操作系統的使用者) | `users.usr_id` |
     | `orders_create_dt` | DateTime | 建立該筆訂單的時間 |  |
     | `orders_up_pn` | varChar | 更新該筆訂單的人 | `users.usr_id` |
     | `orders_up_dt` | DateTime | 更新該筆訂單的時間 |  |
@@ -384,6 +383,7 @@
             order_items_name NVARCHAR(100) NOT NULL,
         
             order_items_payment_state VARCHAR(20) NOT NULL,
+            order_items_paid_at DATETIME NULL,
             order_items_payment_method VARCHAR(20) NOT NULL,
         
             order_items_unit_price DECIMAL(10,2) NOT NULL,
@@ -401,6 +401,10 @@
             order_items_create_dt DATETIME NOT NULL
                 CONSTRAINT DF_order_items_create_dt DEFAULT (GETDATE()),
         
+            -- 7. 折扣類別和折扣比率
+            discount_type VARCHAR(50) NULL,
+            discount_rate DECIMAL(5,4) NULL,
+            
             order_items_up_pn VARCHAR(50) NULL,
             order_items_up_dt DATETIME NOT NULL
                 CONSTRAINT DF_order_items_up_dt DEFAULT (GETDATE()),
@@ -431,9 +435,9 @@
         	bonus_benefit_quantity,
         	bonus_benefit_unit,
         	order_items_create_pn
-          )
-          values
-          (1, '2026-07-16 01:19:19.570', 'Ticket', 'MONTHLY', '月票', 'Paid', 'Cash', '1960.00', '1960.00', '1960.00', '1', 0, null, 'test_id')
+        )
+        values
+        (1, '2026-08-14 16:47:19.787', 'Ticket', 'MONTHLY', '月票', 'Paid', 'Cash', '1960.00', '1960.00', '1960.00', '1', 0, null, 'test_id')
         ```
         
     
@@ -454,7 +458,9 @@
     | `order_items_payment_state` | Enum | 付款狀態
       • `Paid`
       • `UnPaid`
+      • `Refund`
       • `Cancel` |  |
+    | `order_items_paid_at` | DATETIME nullable | 付款日期，付款後才開始計算有效日 |  |
     | `order_items_payment_method` | Enum | 付款方式
       • 目前會是Cash |  |
     | `order_items_unit_price` | Decimal | 明細單價快照
@@ -479,6 +485,9 @@
       • `Days` 
       • `Credits` 
       • `Pieces`** |  |
+    | `discount_type` | varchar(50) nullable | 折扣類別，目前只有
+    `Family` 、`Renewal` 方案 |  |
+    | `discount_rate`  | decimal(5, 4) nullable | 折扣比例，95折0.95 |  |
     | `order_items_create_pn` | VarChar(50) | 建立資料的人 | `users.usr_id` |
     | `order_items_create_dt` | DateTime | 建立該明細資料的時間 |  |
     | `order_items_up_pn` | varChar | 更新檔案的人 | `users.usr_id` |
@@ -520,7 +529,7 @@
         
             ticket_plan_kind_price DECIMAL(10,2) NOT NULL,      -- 價格
             ticket_plan_kind_default_credit INT NULL,       -- 額度
-            ticket_plan_kind_default_expire_days INT NOT NULL,  -- 有效天數
+            ticket_plan_kind_default_expire_days INT NULL,  -- 有效天數
         
             ticket_plan_kind_default_is_active varchar(1) NOT NULL,    -- 是否啟用
             
@@ -538,7 +547,7 @@
         )
         VALUES
         -- 單次與抵用券
-        ('SINGLE',      'PACK',   '單次票',       250,   1,   1,   'Y'),
+        ('SINGLE',      'PACK',   '單次票',       250,   1,   null,   'Y'),
         ('COUPON',      'PACK',   '折抵票',       0,     1,   30,  'Y'),
         ('FREE_TRIAL',  'PACK',   '免費體驗票',    0,     1,   14,   'Y'),
         
@@ -615,7 +624,7 @@
      • `FREE_TRIAL`→ 1
      • `NEW_PROMO`→ 5
      |
-    | `ticket_plan_kind_default_expire_days` | int | 預設到期天數 |   • `SINGLE`→ 1
+    | `ticket_plan_kind_default_expire_days` | int | 預設到期天數 |   • `SINGLE`→ null
       • `MONTHLY`→ 30
       • `COUPON` → 30
       • `PACK_10`→ 90
@@ -625,7 +634,7 @@
       • `FREE_TRIAL`→ 14
       • `B12G2` → 420
       • `B6G1` → 210 |
-    | `ticket_plan_kind_is_active` | varChar(1) | 是否上架
+    | `ticket_plan_kind_default_is_active` | varChar(1) | 是否上架
       • `Y`上架
       • `N`下架不顯示 |  |
 - 規則定義表 **`plan_rule`**
@@ -683,24 +692,24 @@
     | `plan_rule_up_dt` | DateTime | 規則更新日期 |  |
 - 票券種類規則關聯表 **`ticket_plan_kind_rule`**
     - 定義哪一種票券套用哪些規則。一種票券可以適用多個規則；一種規則可以用在多個票券。
-    - `ticket_plan_kind_sn` , `ticket_plan_rule_sn` 當複合主鍵。
+    - `ticket_plan_kind_sn` , `plan_rule_sn` 當複合主鍵。
     - Create Table code
         
         ```sql
         CREATE TABLE ticket_plan_kind_rule (
             ticket_plan_kind_sn            INT          NOT NULL,
-            ticket_plan_rule_sn            VARCHAR(20)  NOT NULL,
+            plan_rule_sn                   VARCHAR(20)  NOT NULL,
             ticket_plan_kind_tag_create_dt DATETIME2    NOT NULL DEFAULT SYSDATETIME(),
         
             CONSTRAINT PK_ticket_plan_kind_rule 
-                PRIMARY KEY (ticket_plan_kind_sn, ticket_plan_rule_sn),
+                PRIMARY KEY (ticket_plan_kind_sn, plan_rule_sn),
         
             CONSTRAINT FK_tpkt_kind 
                 FOREIGN KEY (ticket_plan_kind_sn) 
                 REFERENCES ticket_plan_kind(ticket_plan_kind_sn),
         
             CONSTRAINT FK_tpkt_rule  
-                FOREIGN KEY (ticket_plan_rule_sn)  
+                FOREIGN KEY (plan_rule_sn)  
                 REFERENCES plan_rule(plan_rule_sn)
         );
         ```
@@ -726,7 +735,7 @@
     | `ticket_plan_kind_sn` | varChar(PK)、FK | 票券種類，必須來自
     `ticket_plan_kind.ticket_plan_kind_sn` |  |
     | `plan_rule_sn` | VarChar(PK)、FK | 規則種類，必須來自
-    `plan_rule.ticket_plan_rule_sn` |  |
+    `plan_rule.plan_rule_sn` |  |
     | `ticket_plan_kind_rule_create_dt`  | DateTime | 該規則建立日期 |  |
 - 產品種類表 **`products`** (目前暫時用不到)
     
