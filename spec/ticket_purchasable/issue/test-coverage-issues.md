@@ -1,5 +1,7 @@
 # 待補測試事項
 
+以下為原始待辦清單，部分已完成。2026-09-09 已完成 Application 104、API 43（其中 GymDB 25）、前端時間測試 5 個回歸；請以 [05-remaining-alignment-plan.md](../implement_plan/05-remaining-alignment-plan.md) 的案例對照與缺口為最新狀態，不把本檔所有項目視為仍未實作，也不把已通過測試當成完整 HTTP／核銷驗收。
+
 ## 1. Catalog 查詢測試
 
 建議覆蓋：

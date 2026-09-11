@@ -10,9 +10,9 @@
 
 - 只回傳啟用中的票券產品。
 - 只帶出啟用中的規則關聯與啟用中的全域規則。
-- 目前可購買資格只輸出 `NEW_ONLY`、`RENEWAL` 兩種 `EligibilityRuleCodes`。
+- `Tags` 保留啟用的原始規則標籤；由 `TicketPlanRulePolicy.BuildEligibilityRuleCodes()` 集中產生 `EligibilityRuleCodes`，排除 display／paused 規則，未知資格 code 保留並交由 service 在缺 handler 時拒絕。
 - 若方案關聯到 `HIDDEN`，且該關聯與全域規則皆啟用，該方案不出現在目錄。
-- 若方案關聯到 `NEW_ONLY` 或 `RENEWAL`，但關聯停用或全域規則停用，該方案不出現在目錄。
+- 若方案關聯到資格限制規則，但關聯停用或全域規則停用，該方案不出現在目錄。SQL 的非資格排除集合與隱藏集合均由同一 policy 提供，不自行硬編碼分類。
 - 輸出 DTO 會依方案資料推導票券類型，例如堂數券、月票。
 
 ## 資料開關語意
@@ -35,20 +35,23 @@
 - 續約資格是依票券家族計算。
 - 若會員符合續約資格，仍可購買同家族標準方案，也可購買其他家族標準方案。
 
-## 目前重要缺口
+## 資格與註冊情境
 
-- 目前目錄 SQL 只把 `NEW_ONLY`、`RENEWAL` 輸出給 eligibility service。若未來新增其他限制規則，但 SQL 沒同步放進 `EligibilityRuleCodes`，該規則不會被購買資格服務檢查。
-- 註冊可購買清單有額外排除 `RENEWAL`，但一般目錄與註冊目錄不是完全同一條過濾規則。
-- 若想讓資料設定完全驅動規則，目錄查詢、註冊查詢、後端購買檢查需要同步理解相同的規則集合。
+- HIDDEN 為目錄顯示規則；FAMILY_ELIGIBLE 為已知暫停規則，均不進資格 handler。
+- 註冊清單與會員清單使用相同 catalog，並呼叫 `CanPurchaseAsync(context, plan, ct)`。
+- 註冊情境要求每個 handler 明確支援 Registration，再執行適用性與條件驗證；預設不支援，NEW_ONLY／RENEWAL 目前均不開放。
+- 未知資格規則沒有 handler 時拒絕；不能漏傳成無限制方案。
+
+2026-09-07 此分類與共用驗證已實作並有單元測試；實際 SQL 的隱藏／停用組合尚待整合驗收，見 `implement_plan/05-remaining-alignment-plan.md`。
 
 ## 建議調整
 
 - 把所有會影響購買資格的規則都輸出成 `EligibilityRuleCodes`，不要只限 `NEW_ONLY`、`RENEWAL`。
 - `HIDDEN` 可以保留為目錄顯示規則，不一定交給購買資格服務。
-- 註冊清單應明確定義是「只允許標準方案與新客方案」，還是「排除所有需會員既有狀態的方案」。
+- 註冊支援由 handler 的 `SupportsRegistration` 明確設定，仍須執行實際條件驗證。
 - 若新增規則代碼，需同時補：
   - 規則資料。
   - 方案規則關聯。
   - 後端 rule handler。
-  - 目錄 SQL 對 `EligibilityRuleCodes` 的輸出。
+  - 集中 policy 分類與停用防線的一致性。
   - 購買流程測試。

@@ -4,6 +4,12 @@
 
 ## 文件分工
 
+- [implement_plan/README.md](implement_plan/README.md)
+  2026-09-06 討論結論、待實作步驟與驗收案例。已確認的變更以該目錄決策為準；下列正式規格尚待同步，不代表新行為已實作。
+- `business-ticket-purchasability-spec.md`
+  對外 / 客戶導向的購買資格商業邏輯規格書，採用資訊隱蔽（Information Hiding）呈現業務規則與判定矩陣，隱蔽底層程式碼與技術架構。
+- `client-facing-acceptance-test-cases.md`
+  對外 / 客戶導向的業務驗收測試矩陣（Acceptance Test Matrix），整理 7 大模組共 72 項業務驗收情境與通過判定標準。
 - `ticket-plan-catalog-spec.md`
   方案目錄、資料開關、規則關聯、對外欄位與目前 SQL 查詢行為。
 - `ticket-purchasability-spec.md`

@@ -1,5 +1,7 @@
 # 待確認規格事項
 
+2026-09-06 更新：本次討論結論已轉錄至 [implement_plan 已確認決策](../implement_plan/01-confirmed-decisions.md)，修改與驗收追蹤見 [實作計畫索引](../implement_plan/README.md)。下列保留原始問題與舊行為描述；不得再將舊公式、order item 判定、註冊開放範圍或取消當天限制當成最新結論。程式尚未依新計畫調整。
+
 ## 1. NEW_ONLY 的 30 天定義
 
 目前程式碼使用 `Now.AddDays(-30)`，屬於 rolling timestamp 判斷。

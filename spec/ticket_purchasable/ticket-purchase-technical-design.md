@@ -26,38 +26,45 @@
 目前 eligibility rule handler 以 `RuleCode` 對應資料規則代碼。每個 handler 提供：
 
 - `RuleCode`
+- `SupportsRegistration`（預設 false）
 - `AppliesTo`
 - `IsSatisfiedAsync`
 
 購買資格服務行為：
 
 - 找不到 handler：不可購買。
+- Registration 不支援：不可購買；支援時仍須繼續執行 handler 條件。
 - handler 不適用：不可購買。
 - handler 驗證失敗：不可購買。
 - 沒有任何 rule code：可購買。
 
 這個設計可以支援資料驅動規則，但前提是目錄查詢必須把會影響購買資格的 rule code 正確輸出。
 
-## 目前已知不一致
+註冊附帶建單使用 Registration；註冊完成後延後付款使用 ExistingMember，不新增訂單來源欄位。付款當下以最新 catalog 與會員狀態重驗，成功才發 pass 並 reconcile。
 
-- 目前目錄 SQL 只輸出 `NEW_ONLY`、`RENEWAL` 到 `EligibilityRuleCodes`。若資料庫新增其他限制規則，購買資格服務不會收到該 code。
-- `HIDDEN` 是目錄顯示規則，並非 eligibility service 檢查的規則。
-- NEW_ONLY 使用 `Now.AddDays(-30)`，不是純台灣日曆 DateOnly 判斷。
-- NEW_ONLY 購買歷史查詢目前沒有明確排除已取消 pass。
-- 續約與生命週期舊計畫提到部分 end reason 命名，需與現有 DB 實際值統一。
-- 舊計畫中的多受益者家庭購買已被後續決策暫停。
+## Rule 分類與目錄輸出
 
-## 台灣日曆調整建議
+同一張 `plan_rule` 繼續作為規則來源，但程式端以集中 policy 區分用途：
 
-目標是把涉及「天」的資格判斷改成台灣日曆日，而不是 rolling timestamp。
+- `Tags`：給 UI 顯示，可包含 `NEW_ONLY`、`RENEWAL`、`FAMILY_ELIGIBLE`、`HIDDEN`。
+- `EligibilityRuleCodes`：只放目前真的要執行購買資格驗證的規則。
+- `HIDDEN` 是顯示規則，不進 eligibility service。
+- `FAMILY_ELIGIBLE` 目前暫停，不進 eligibility service。
+- 其他未被歸類為顯示規則或暫停規則的 active rule，會進入 `EligibilityRuleCodes`；若沒有 handler，購買資格會 fail closed。
 
-建議順序：
+Catalog SQL 的顯示／非資格集合由 `TicketPlanRulePolicy` 提供參數，資格 code 使用 `BuildEligibilityRuleCodes()` 從原始規則產生，避免 SQL 另行硬編碼分類。
 
-1. 保留 `IClock` 與 `TaipeiClock`。
-2. 在 NEW_ONLY 規則中改用 `DateOnly` 比較。
-3. 將 `AssignedAt` 先轉為台灣日期。
-4. 使用 `assignedDate >= clock.Today.AddDays(-30)`。
-5. 補測試固定 clock，覆蓋台灣 00:00 邊界。
+## 台灣日曆調整
+
+涉及「天」的資格判斷以台灣日曆日為準，而不是 rolling timestamp。
+
+NEW_ONLY 目前規格：
+
+- 保留 `IClock` 與 `TaipeiClock`。
+- 在 NEW_ONLY 規則中改用 `DateOnly` 比較。
+- 將 `AssignedAt` 先轉為台灣日期。
+- 使用 `assignedDate >= today.AddDays(-29)`，表示註冊當天算第 1 天，共 30 天。
+- 補測試固定 clock，覆蓋台灣 00:00 邊界。
 
 若 `AssignedAt` 已保證是台灣本地時間，可直接取 `.Date` 後轉 `DateOnly`。若來源可能是 UTC，需先透過 `TimeZoneInfo.ConvertTimeFromUtc` 或統一的 clock/helper 轉成台灣時間。
 
@@ -98,11 +105,13 @@
 - Catalog：HIDDEN 不顯示，停用產品不顯示，停用限制性規則不顯示。
 - Eligibility：無規則可買，缺 handler 不可買，NEW_ONLY/RENEWAL 各自通過與失敗。
 - NEW_ONLY：30 天內、超過 30 天、剛好邊界、曾買同 SKU。
-- RENEWAL：有效期內、到期後 9 天內、超過 9 天、有 queue、同日取消重試、來源已被 successor 占用。
+- RENEWAL：有效期內、到期後 9 天內、超過 9 天、有 queue、取消後重訂期限、來源已被 successor 占用。
 - Purchase：Paid 建 pass，UnPaid 不建 pass，付款時重驗資格。
 - Price：未付款訂單建立後改價，付款應失敗。
 - Concurrency：兩筆續約同時承接同一來源，最多一筆成功。
-- UI/API：註冊清單排除 RENEWAL，既有會員清單依資格顯示。
+- UI/API：註冊清單排除 NEW_ONLY／RENEWAL，既有會員清單依資格顯示。
+
+2026-09-09 已補付款與記憶體版排隊回歸，結果與剩餘 SQL／資料查核見 `implement_plan/05-remaining-alignment-plan.md`；尚未完成整份驗收。
 
 ## 可捨棄舊檔案建議
 

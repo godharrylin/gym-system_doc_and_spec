@@ -27,6 +27,7 @@
 - 學生 profile。
 - 是否為有效學生。
 - 目前時間 `Now`，由 Taipei clock 取得。
+- 情境類型：既有會員購買或註冊流程購買。
 
 若無法建立 Context，個人化可購買清單會回傳空清單。
 
@@ -36,6 +37,7 @@
 
 - 若沒有任何 eligibility rule code，表示通過資格檢查。
 - 若找不到對應 rule handler，視為不通過。
+- 註冊情境必須先通過 handler 的 `SupportsRegistration`（預設 false），再檢查以下實際條件。
 - 若 rule handler 的 `AppliesTo` 回傳 false，視為不通過。
 - 若 rule handler 的 `IsSatisfiedAsync` 回傳 false，視為不通過。
 - 所有規則皆通過才可購買。
@@ -50,19 +52,22 @@
 目前 NEW_ONLY 條件：
 
 - 學生必須有 `AssignedAt`。
-- `AssignedAt` 不得早於 `Now.AddDays(-30)`。
+- 使用台灣日曆日判斷，註冊當天算第 1 天，共 30 天。
+- 比較公式為 `assignedDate >= today.AddDays(-29)`。
 - 學生不可曾經購買同一個方案 SKU。
 
 購買歷史判斷目前查詢：
 
 - `sdt_ticket_pass`
-- 對應 `order_items`
 - 擁有者為同一學生。
-- item type 為 Ticket。
-- ref id 等於同一個方案 id。
-- order item payment state 不為 Cancel。
+- 票券方案代碼等於同一個 SKU。
+- 只要同 SKU 曾存在 pass，不論 pass 後續是否取消，都視為已使用新客購買資格。
 
-目前程式碼沒有明確排除已取消的 pass，所以「買過後取消」是否仍擋 NEW_ONLY，要依目前查詢結果看待為已購買紀錄。
+目前不支援錯帳／人工取消例外。未付款訂單若尚未建立 pass，不視為已使用 NEW_ONLY 資格。
+
+資料庫 `user_role.user_role_cdt` 應儲存台灣本地時間；若未來有匯入、批次或舊資料，不保證來源時區時，需先轉成台灣日期再判斷。
+
+時間來源政策（2026-09-09）：維持註冊使用 TaipeiClock。匯入／批次在寫入邊界依明確來源時區轉成台灣本地時間，已為台灣時間不重複轉換；SQL 讀回及 NEW_ONLY 判斷不推測時區。來源不明的新匯入資料先確認；既有資料缺乏來源證據時保持原值，不整批加 8 小時。本次只修正測試的 UTC 寫入，不修改既有角色時間。
 
 ## RENEWAL 規則
 
@@ -77,21 +82,29 @@ RENEWAL 用來判斷學生是否有同家族票券的續約資格。主要條件
 - 若來源票券已用完，以 `endedAt` 作為有效結束日。
 - 若未用完，以 `validEndDate` 作為有效結束日。
 - 台灣今天若超過有效結束日加 9 天，不可續約。
-- 若已有排隊中票券，通常不可續約。
-- 若存在已取消的續約，且最後取消日為今天，允許同日重試。
+- 若會員已有任何家族的非單堂排隊票券，通常不可續約；queue 衝突是會員全域檢查，來源選取才限同家族。
+- 單堂票只影響啟用順序，不應阻擋續約購買。
+- 若存在已取消的未使用續約票，允許在原續約截止日前重訂；重訂期限不得因取消動作延長原本截止日。
 - `today <= effectiveEndDate` 視為提前續約。
 
 符合續約資格時，使用者可以買續約方案，也仍可買標準方案。標準方案不因符合續約資格而被排除。
 
 ## 註冊可購買清單
 
-註冊可購買 API 目前在目錄查詢後額外排除 `RENEWAL` 方案。這表示註冊流程不會顯示續約方案。
+註冊可購買 API 與既有會員可購買 API 保留兩支端點，但共用 `CanPurchaseAsync(context, plan, ct)`。Context 會標示目前是註冊情境或既有會員情境。
 
-目前註冊流程若帶票券購買，最後仍會走共用 `TicketPurchaseService`，所以後端購買檢查仍是最終權威。
+註冊情境規則：
+
+- 依賴既有會員狀態的規則預設不開放註冊情境。
+- `NEW_ONLY`、`RENEWAL` 目前都不開放註冊情境。
+- 無 eligibility rule 的一般方案可在註冊流程顯示與購買。
+- 註冊流程若帶票券購買，會走共用 `TicketPurchaseService`，並以註冊情境重驗資格。
 
 ## 未付款訂單付款時重驗
 
 建立未付款訂單時不建立 pass，也不占用續約來源。之後付款時會重新驗證：
+
+註冊建立的訂單，在註冊完成後延後付款時使用 ExistingMember Context；歷史未付款訂單也以付款當下的會員身分與最新規則判斷。不保存或要求前端提供原註冊情境。註冊建單當下仍使用 Registration，不能直接提交註冊不開放的 SKU。
 
 - 訂單仍必須是未付款狀態。
 - 學生仍必須有效。
@@ -103,26 +116,17 @@ RENEWAL 用來判斷學生是否有同家族票券的續約資格。主要條件
 
 若價格已變動，付款會回傳 `TICKET_PLAN_PRICE_CHANGED`。
 
+例如建單時一般方案、付款時新增 NEW_ONLY：會員仍在 30 天內且沒有同 SKU pass，才可付款；否則拒絕。付款成功才建立 pass，再依 Active slot 與排隊順序決定啟用，並非付款一律立即 Active。
+
 ## 需要考慮的案例
 
-- 新客在 30 天內，且未買過同 SKU：可買 NEW_ONLY。
-- 新客超過 30 天：不可買 NEW_ONLY。
-- 新客買過同 SKU 後取消：目前仍可能因購買歷史被視為不可再買，需要產品規格確認。
+- 新客在註冊當天起算 30 個台灣日曆日內，且未買過同 SKU：可買 NEW_ONLY。
+- 新客超過第 30 個台灣日曆日：不可買 NEW_ONLY。
+- 新客買過同 SKU 後取消 pass：不可再買同 SKU NEW_ONLY。
 - 有同家族有效來源票券且在到期後 9 天內：可買 RENEWAL。
 - 已超過到期後 9 天：不可買 RENEWAL。
-- 已有排隊票券：不可再買 RENEWAL，除非符合同日取消重試例外。
+- 已有任一家族非單堂排隊票券：不可再買 RENEWAL，除非符合取消重訂例外。
 - 符合 RENEWAL 時仍要能買標準方案。
 - 家庭多受益者購買：目前不可購買。
 - 方案在建立未付款訂單後下架或改價：付款時不可成立。
-- 目錄 SQL 未輸出某限制規則 code：購買資格服務不會檢查該規則，這是目前規則擴充缺口。
-
-## 台灣日曆缺口
-
-目前已使用 Taipei clock 取得 `Now` 與 `Today`。但 NEW_ONLY 仍使用 `Now.AddDays(-30)` 的 rolling timestamp 判斷，不是純 DateOnly 日曆日。
-
-若規格要求「台灣日曆 30 天」，建議調整為：
-
-- 使用 `IClock.Today` 或以 Taipei time 轉成 `DateOnly`。
-- 將 `AssignedAt` 轉成台灣日期。
-- 比較 `assignedDate >= today.AddDays(-30)`。
-- 補邊界測試：台灣 00:00 前後、UTC 跨日、剛好第 30 天、超過第 30 天。
+- 目錄 SQL 應輸出目前真的需要執行資格驗證的 rule code；`HIDDEN` 屬顯示規則，`FAMILY_ELIGIBLE` 目前暫停，不進 eligibility rule。

@@ -8,9 +8,9 @@
 
 - 一般方案目錄：回傳目前可上架顯示的方案資料。
 - 既有會員個人化可購買清單：依學生資格過濾可購買方案。
-- 註冊可購買清單：排除 `RENEWAL`，用於新會員註冊流程。
+- 註冊可購買清單：透過 Registration Context 排除不支援註冊的規則，目前 NEW_ONLY／RENEWAL 都不開放，並執行共用 handler 驗證。
 - 購買 API：重新檢查學生、方案、數量、價格、付款、eligibility。
-- 未付款訂單付款 API：付款當下重新檢查方案、價格與資格。
+- 未付款訂單付款 API：一律使用 ExistingMember Context，付款當下重新檢查方案、價格與資格；包含註冊來源與歷史未付款訂單。
 
 ## DTO 欄位語意
 
@@ -25,6 +25,10 @@
 - `type`：票券類型。
 - `eligibilityRuleCodes`：後端用於資格判斷的規則代碼。
 - `purchaseKind`：可由 `eligibilityRuleCodes` 推導，不建議新增 DB 欄位。
+
+票券持有紀錄 API 保留 `paidAt`（`yyyy-MM-dd`），新增 `paidAtTimestamp`（例如 `2026-09-09T14:23:45+08:00`）供購買紀錄顯示到秒；`validStartDate`／`validEndDate` 仍為日曆日。會員詳情已使用台灣時區 helper 顯示新欄位。本項不調整資料表欄位。
+
+未付款不發票、不啟用；付款成功後依排隊規則啟用，前端不能把「Paid」直接視為「Active」。
 
 ## 前端顯示規則
 
@@ -72,7 +76,7 @@
 
 ## 建議測試
 
-- 註冊清單不顯示 RENEWAL。
+- 註冊清單不顯示 NEW_ONLY／RENEWAL。
 - 既有會員符合續約資格時顯示續約方案。
 - 符合續約資格時，標準方案仍可買。
 - 前端送出不可購買方案時，後端拒絕。

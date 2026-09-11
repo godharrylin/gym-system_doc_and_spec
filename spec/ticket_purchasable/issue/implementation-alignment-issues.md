@@ -1,5 +1,7 @@
 # 待實作與待對齊事項
 
+本檔下方保留最初查核基線，不代表最新規格／程式狀態（例如 NEW_ONLY 已採 `AddDays(-29)`）。2026-09-09 的修正、GymDB 驗收及尚未覆蓋範圍請看 [implementation-progress.md](implementation-progress.md) 與 [05-remaining-alignment-plan.md](../implement_plan/05-remaining-alignment-plan.md)。舊內容保留，不刪除。
+
 ## 1. NEW_ONLY 改成台灣日曆判斷
 
 目前：

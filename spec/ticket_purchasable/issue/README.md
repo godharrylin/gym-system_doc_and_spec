@@ -4,6 +4,8 @@
 
 ## 文件
 
+- [implementation-progress.md](implementation-progress.md)
+  2026-09-09 的已修正範圍、測試結果與待確認事項；其他舊 issue 尚未全部回填。
 - `spec-confirmation-issues.md`
   需要產品或規格確認後才能決定做法的事項。
 - `implementation-alignment-issues.md`
