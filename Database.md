@@ -63,7 +63,7 @@
             bmc_role_cdt  DATETIME2(0)   NOT NULL CONSTRAINT DF_bmc_role_create_dt DEFAULT (SYSDATETIME()),
             bmc_role_upd_dt     DATETIME2(0)   NOT NULL CONSTRAINT DF_bmc_role_upd_dt DEFAULT (SYSDATETIME()),
             CONSTRAINT PK_bmc_role PRIMARY KEY (bmc_role_id),
-            CONSTRAINT UQ_bmc_role_code UNIQUE (bmc_role_code),
+            CONSTRAINT UQ_bmc_role_code UNIQUE (bmc_role_code)
         );
         
         INSERT INTO dbo.bmc_role (bmc_role_name, bmc_role_code)
@@ -97,7 +97,7 @@
         CREATE TABLE dbo.user_role (
             usr_id               NVARCHAR(50)  NOT NULL,
             bmc_role_id          INT           NOT NULL,
-            // 1:啟用, 0:不啟用
+            -- 1:啟用, 0:不啟用
             user_role_is_active  BIT   NOT NULL CONSTRAINT DF_user_role_is_active DEFAULT (1),
             user_role_cdt        DATETIME2(0)  NOT NULL CONSTRAINT DF_user_role_cdt DEFAULT (SYSDATETIME()),
             user_role_upd_dt      DATETIME2(0)  NOT NULL CONSTRAINT DF_user_role_upd_dt DEFAULT (SYSDATETIME()),
@@ -106,11 +106,11 @@
         
         INSERT INTO user_role(usr_id, bmc_role_id)
         VALUES 
-        (N'U00001', 4),
-        (N'U00001', 2),
-        (N'U00002', 2),
-        (N'U00003', 2),
-        (N'U00006', 2);
+        (N'U0000000001', 4),
+        (N'U0000000001', 2),
+        (N'U0000000002', 2),
+        (N'U0000000003', 2),
+        (N'U0000000006', 2);
         
         CREATE UNIQUE INDEX UX_user_roles_user_role
         ON dbo.user_role (usr_id, bmc_role_id);
@@ -261,18 +261,23 @@
     | `update_dt` | datetime | 更新日期 |  |
     | `update_pn` | varchar(21) |  |  |
 - 學生出席課程紀錄表 `sdt_att_record`
-    - 資料新增條件: 從三叉機傳送進入的紀錄過10min 後都沒有出去的紀錄。
+    - 2026-10-06 同步已確認行為：緩衝期可建立 Pending／暫占資料；正式出席以「課程開始＋十分鐘」截止時的館內狀態確認，不是每個人進場後各等十分鐘。占用儲存與資料建立細節仍待設計，這裡不代表 DB 已完成變更。
+    - 截止前離場未回者不成立出席並釋放暫占；確認後中途離場仍保留出席及固定占用，離場／返回另查進出紀錄。
+    - 缺票留館保存事實及 Ineligible／remark，不欠堂、不扣負數、不補結算，也不授予同堂回場資格。
     
     | **欄位名稱** | **資料類型** | **說明** |
     | --- | --- | --- |
     | **`sdt_att_record_sn`** | int | 出席流水號 |
     | **`user_id`** | Foreign Key | 使用者編號，關連到`user`表，用它來驗證身份。 |
     | **`cls_scdle_arnge_sn`** | Foreign Key | 課程編號，關連到`cls_scdle_arnge`表 |
-    | **`sdt_att_record_ticket_id`** | Foreign Key | 票券，以什麼票券進入該堂課 |
+    | **`sdt_att_record_ticket_id`** | 票券關聯 | 出席截止時整理後固定的該堂票券，B 不依當下 Current Plan 重選；缺票可為 NULL，不強填已耗盡舊票。實際型別／約束需查 DB |
     | **`sdt_att_record_status`** | varChar | 出席狀態
-    • `Pending`(暫時進出)，進場後，10min內出去會是這個狀態。
-    • `CheckIn`(已簽到)，進場10min後都在內場，會變這個狀態。
+    • `Pending`: 緩衝期內，出席尚未確認。中途離場則保留已確認出席、另查進出紀錄
+    • `CheckIn`(已簽到)：在「開課＋十分鐘」截止時仍在館內，確認該堂出席事實；合法票券資格另外看 eligibility_state，不以 CheckIn 單獨授權或扣堂。
     • `CheckOut`(已簽退)，課程結束後，有簽退會是這個狀態。 |
+    | **`sdt_att_record_ticket_eligibility_state`** | varchar(20) | **該學生在「該課程出席確認時」的票券資格狀態。**
+      •  `Eligible` : 有符合規則的票券；堂票已成功占用額度
+      • `Ineligible`: 沒有可用票券，或沒有足夠可占用額度 |
     | **`sdt_att_record_chk_in_time`** | DateTime | 簽到 |
     | **`sdt_att_record_chk_out_time`** | DateTime | 簽退 |
     | **`sdt_att_record_remark`** | varChar (Nullable) | 備註 |
