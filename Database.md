@@ -1269,6 +1269,7 @@
     保留 |  |
 - 進出紀錄表 **`device_record`**
     - 三叉機刷入刷出都會產生這張表
+    - 2026-10-16 第二階段採加欄方式擴充既有表，沒有刪除或重建舊資料。`Requested` 先於外部控制呼叫寫入；完成後更新為 `Succeeded`／`Failed`／`Unknown`／`Denied`。只有廠商明確成功、且不是 Mock，`affects_presence` 才可為 1。
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
@@ -1279,3 +1280,338 @@
     | **`device_id`** | VarChar | 機器編號 (新增) | Gate_01, Gate_02 |
     | **`is_success`** | Boolean | 是否成功開啟 (新增) | true (成功), false (失敗) |
     | **`device_record_dt`** | DateTime | 感應時間 | 2026-03-13 19:10:00 |
+    | **`request_id`** | UniqueIdentifier / Unique filtered index | 呼叫方同一次操作的防重識別，不是授權憑證 | GUID |
+    | **`gate_station_sn`** | Int | 邏輯對應進／出站點 | 1 |
+    | **`gate_device_session_id`** | UniqueIdentifier | 操作當下的瀏覽器裝置授權 | GUID |
+    | **`identity_kind`** | VarChar(20) | `Staff`／`Student`／`IdentifiedUser` 等身分快照 | Staff |
+    | **`role_snapshot`** | NVarChar(1000) / JSON | 操作當下啟用角色，不存電話或 token | `["Admin"]` |
+    | **`operation_kind`** | VarChar(30) | 第一版正常客人站點使用 `CustomerGate` | CustomerGate |
+    | **`outcome`** | VarChar(20) | `Requested`／`Succeeded`／`Failed`／`Unknown`／`Denied` | Succeeded |
+    | **`result_code`** | VarChar(80) | 穩定結果代碼 | COMMAND_ACCEPTED |
+    | **`requested_at`** | DateTime2(3) | 後端收到操作並建立紀錄的台灣時間 | 2026-10-16 19:10:00.000 |
+    | **`responded_at`** | DateTime2(3) | 收到廠商結果或確定拒絕的時間 | 2026-10-16 19:10:00.125 |
+    | **`completed_at`** | DateTime2(3) | 此筆處理落庫完成的業務結果時間 | 2026-10-16 19:10:00.125 |
+    | **`remark`** | NVarChar(500) | 非敏感異常說明，不存 Cookie／配對碼／電話 | 結果不明原因 |
+    | **`affects_presence`** | Bit | 1 才能作館內狀態推導事件；失敗、拒絕、Unknown、Mock 必須為 0 | 1 |
+    | **`is_simulated`** | Bit | 是否由 Turnstile Mock 產生；Mock 成功不等於實際進出 | 0 |
+
+    實際變更腳本：[第二階段 device_record 擴充](spec/IO_gyms/02-開門控制與進出紀錄/sql/02-extend-device-record.sql)。館內狀態第一版由每位使用者最後一筆 `affects_presence = 1` 的成功進／出事件推導；`sdt_profile_cur_visit_at` 仍只是學生最近成功進場時間，不單獨代表目前在館內。
+
+## 進出站點與瀏覽器授權（第二階段資料設計）
+
+整理日期：2026-10-10。依據：[裝置配對、換機、撤銷與授權保存規劃](spec/IO_gyms/02-開門控制與進出紀錄/01-device-pairing-and-authorization-plan.md)。
+
+2026-10-16 已對開發／測試用 GymDB 執行經確認的冪等腳本，建立 `gate_station`、`gate_device_session`，並建立 `ENTRY_MAIN`／`EXIT_MAIN` 站點；執行後 SQL 整合測試已回滾測試資料並通過。其他環境仍須個別部署，不可因 GymDB 已完成便視為 NAS／正式環境已完成。
+
+- 已確認：後端固定配對碼、獨立瀏覽器授權、持久 Cookie、新機確認後取代舊機、每站點只允許一份有效授權。
+- 配對碼放後端設定，不存這兩張表，不放前端、Cookie、網址或日誌；真實配對碼不提交 Git。
+- DB 不存完整 Cookie／明文票據；Cookie 由 ASP.NET Core 保護，單獨知道 session ID 不能認證。
+- 已確認 DB 授權不自動到期，直到確認換機、裝置自行撤銷或站點停用才失效；`expire_dt = NULL` 表示不設 DB 到期日。瀏覽器 Cookie 採持久保存與有效使用續簽，但瀏覽器清除網站資料時仍須重新配對。
+- 所有 `datetime2(3)` 存台灣本地時間，格式如 `2026-10-10 09:15:30.125`。由後端 IClock 明確提供，不使用 DB 主機預設時間猜測時區；Cookie ExpiresUtc 另轉為同一時刻的 UTC。
+- 關聯採邏輯關聯，不新增 DB 外鍵；應用程式與交易必須檢查關聯一致性。主鍵、唯一索引及 CHECK 如下。
+
+### `dbo.gate_station`：固定進／出站點
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `gate_station_sn` | `int IDENTITY(1,1)` | 否 | 內部主鍵，整數流水號 |
+| `gate_station_code` | `varchar(30)` | 否 | 唯一代碼，如 `ENTRY_MAIN`／`EXIT_MAIN`；換機不改站點 |
+| `gate_station_name` | `nvarchar(50)` | 否 | 中文名稱，如「大門進場站點」 |
+| `gate_station_direction` | `tinyint` | 否 | `1`＝進場，`2`＝出場，由後端設定 |
+| `gate_station_is_active` | `bit` | 否 | `1`＝啟用，`0`＝停用；後端建立資料時明確指定 |
+| `gate_station_current_session_id` | `uniqueidentifier` | 是 | 邏輯對應目前有效 session ID；未配對／撤銷後可 NULL |
+| `gate_station_create_dt` | `datetime2(3)` | 否 | 站點建立時間，台灣本地時間 |
+| `gate_station_up_dt` | `datetime2(3)` | 是 | 設定或目前授權最後變更時間 |
+
+### `dbo.gate_device_session`：配對授權與換機歷史
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `gate_device_session_sn` | `bigint IDENTITY(1,1)` | 否 | 歷史紀錄的內部主鍵 |
+| `gate_device_session_id` | `uniqueidentifier` | 否 | 後端產生的唯一 GUID；顯示格式 `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`，ID 不是憑證 |
+| `gate_station_sn` | `int` | 否 | 邏輯對應站點主鍵；不重複保存方向 |
+| `gate_device_session_status` | `varchar(20)` | 否 | `Active`／`Revoked`／`Expired` |
+| `gate_device_session_previous_id` | `uniqueidentifier` | 是 | 被新授權取代的前一份 session ID，首次配對為 NULL |
+| `gate_device_session_create_dt` | `datetime2(3)` | 否 | 配對成功建立時間 |
+| `gate_device_session_expire_dt` | `datetime2(3)` | 是 | NULL＝第一版不自動到期；保留未來明確設定期限的擴充能力 |
+| `gate_device_session_last_seen_dt` | `datetime2(3)` | 是 | 最後有效請求時間，不是硬體識別依據 |
+| `gate_device_session_revoke_dt` | `datetime2(3)` | 是 | 撤銷時間，Revoked 時必填 |
+| `gate_device_session_revoke_reason` | `varchar(30)` | 是 | 建議 `Replaced`／`Manual`；Expired 不冒充人工撤銷 |
+| `gate_device_session_revoke_by` | `nvarchar(50)` | 是 | 自動換機記 `SYSTEM`；人工撤銷記實際操作者 ID，不由配對碼推定 Admin 身分 |
+| `gate_device_session_remark` | `nvarchar(500)` | 是 | 說明，不存配對碼、Cookie 或會員電話 |
+| `gate_device_session_up_dt` | `datetime2(3)` | 是 | 狀態／期限異動時間 |
+
+### CREATE TABLE／索引語法
+
+下列為 SSMS／sqlcmd 可辨識的批次示例，`GO` 不是應用程式可直接送出的 T-SQL。沒有 DROP／覆蓋既有表，也沒有 INSERT 真實資料；執行與正式 migration 都需要另外確認。
+
+```sql
+-- 結構參考；開發／測試 GymDB 已使用下方連結的冪等腳本套用。
+-- Filtered index 所需的連線 SET 選項。
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET NUMERIC_ROUNDABORT OFF;
+GO
+
+CREATE TABLE dbo.gate_station
+(
+    gate_station_sn INT IDENTITY(1,1) NOT NULL,
+    gate_station_code VARCHAR(30) NOT NULL,
+    gate_station_name NVARCHAR(50) NOT NULL,
+    gate_station_direction TINYINT NOT NULL,
+    gate_station_is_active BIT NOT NULL,
+    gate_station_current_session_id UNIQUEIDENTIFIER NULL,
+    gate_station_create_dt DATETIME2(3) NOT NULL,
+    gate_station_up_dt DATETIME2(3) NULL,
+
+    CONSTRAINT PK_gate_station PRIMARY KEY (gate_station_sn),
+    CONSTRAINT UQ_gate_station_code UNIQUE (gate_station_code),
+    CONSTRAINT CK_gate_station_direction
+        CHECK (gate_station_direction IN (1, 2))
+);
+GO
+
+CREATE TABLE dbo.gate_device_session
+(
+    gate_device_session_sn BIGINT IDENTITY(1,1) NOT NULL,
+    gate_device_session_id UNIQUEIDENTIFIER NOT NULL,
+    gate_station_sn INT NOT NULL,
+    gate_device_session_status VARCHAR(20) NOT NULL,
+    gate_device_session_previous_id UNIQUEIDENTIFIER NULL,
+    gate_device_session_create_dt DATETIME2(3) NOT NULL,
+    gate_device_session_expire_dt DATETIME2(3) NULL,
+    gate_device_session_last_seen_dt DATETIME2(3) NULL,
+    gate_device_session_revoke_dt DATETIME2(3) NULL,
+    gate_device_session_revoke_reason VARCHAR(30) NULL,
+    gate_device_session_revoke_by NVARCHAR(50) NULL,
+    gate_device_session_remark NVARCHAR(500) NULL,
+    gate_device_session_up_dt DATETIME2(3) NULL,
+
+    CONSTRAINT PK_gate_device_session
+        PRIMARY KEY (gate_device_session_sn),
+    CONSTRAINT UQ_gate_device_session_id
+        UNIQUE (gate_device_session_id),
+    CONSTRAINT CK_gate_device_session_status
+        CHECK (gate_device_session_status IN ('Active', 'Revoked', 'Expired')),
+    CONSTRAINT CK_gate_device_session_expire
+        CHECK (gate_device_session_expire_dt IS NULL
+               OR gate_device_session_expire_dt > gate_device_session_create_dt),
+    CONSTRAINT CK_gate_device_session_revoked_time
+        CHECK (gate_device_session_status <> 'Revoked'
+               OR gate_device_session_revoke_dt IS NOT NULL)
+);
+GO
+
+-- 每個站點最多一筆 Active；Expired／Revoked 的歷史保留。
+CREATE UNIQUE INDEX UX_gate_device_session_active_station
+    ON dbo.gate_device_session (gate_station_sn)
+    WHERE gate_device_session_status = 'Active';
+GO
+
+CREATE INDEX IX_gate_device_session_station_create
+    ON dbo.gate_device_session
+       (gate_station_sn, gate_device_session_create_dt);
+GO
+```
+
+### 執行邏輯與資料庫防線的分工
+
+- 換機須鎖定站點，在同一交易撤銷舊授權、建立新授權、更新 current_session_id，不只先查後插入。
+- filtered unique index 限制 Active 筆數，不用現在時間動態判斷到期；已過期但仍標 Active 的舊授權需先轉 Expired 再建立新份。
+- 有效授權仍須符合：Cookie 驗證成功、站點啟用、session 屬於站點且等於目前授權、狀態 Active、未到期。
+- 無 FK 不代表可以任意關聯；previous_id 必須指向同站點歷史，current_session_id 必須指向該站點授權，由後端交易檢查。
+- 實際冪等建表／站點 seed 腳本：[裝置授權 schema](spec/IO_gyms/02-開門控制與進出紀錄/sql/01-gate-device-authorization.sql)。配對碼不存 DB；Cookie 金鑰路徑及內網部署參數仍須在各環境設定。
+
+## 出席與扣堂更正資料設計（第六階段）
+
+整理日期：2026-10-15。同步日期：2026-10-16。相關規劃：[人工操作與異常處理](spec/IO_gyms/06-人工操作與異常處理/impelment_rule.md)。本節與階段 06 已同步更正、恢復及第一版界線；本輪僅對齊說明，不修改下列 CREATE 語法，也未執行 SQL。
+
+**文件狀態：僅新增資料表說明及 CREATE 語法，未執行 SQL、未修改 GymDB，也未實作更正流程。** 不可直接對已有同名物件的資料庫重跑；正式 migration 前須核對實際 schema、既有資料、型別及約束，不刪表重建。
+
+### 已確認的規則與資料分工
+
+- 沿用 `sdt_att_record` 保存目前出席結果、`sdt_ticket_usage_log` 保存扣堂／沖銷；另新增 `sdt_att_correction` 保存更正案件，及 `sdt_att_record_audit_log` 保存不可覆寫的出席變動歷史。
+- 第一版由 Admin 自行確認並執行，不另設第二位人員審核；`Pending` 是尚未處理，不是等待另一位主管簽核。理由、依據、操作者及結果仍須保存，後端須驗證權限。
+- 允許撤銷誤判出席，以及補認原本符合歷史資格、但被漏記的出席；不作遲到通融，不拿事後買票補原本沒有的資格，原本正確的 Ineligible 仍不補結算。
+- 沖銷只允許整筆退回原 Consume 的堂數，不提供任意輸入加減堂數，也不刪除或改寫原扣堂紀錄；Reverse 必須關聯原 Consume。月票更正沒有堂數增減。
+- 已影響後續票券啟用者先列 `NeedsReview`，保存案件與原因，不提供一鍵退堂，也不先把舊票恢復為 Active；具體人工解決流程仍待討論。
+- 館內狀態更正採操作當下生效，不連帶回溯出席／扣堂；回溯由本節的獨立案件處理。更正歷史出席也不把學生現在的館內狀態改成在館內。
+- 申請進度可以更新，但每次實際出席變動另新增稽核列；不可把更正申請表當成不可變稽核表，也不能只覆寫 remark。
+- 兩張新表採邏輯關聯，不新增外鍵，沿用本文件的設計原則；應用服務須在交易中驗證學生、場次、出席、票券與原核銷的關聯一致性。
+- 識別欄位以 `nvarchar(50)` 保存使用者／操作者 ID，不保存電話、密碼或 token；正式 migration 前應核對 `users.usr_id` 及現有關聯欄位的實際型別、長度與定序。`SYSTEM` 僅供系統稽核來源，不能代替人工更正的真實 Admin 身分。
+- 所有 `datetime2(3)` 保存台灣本地的實際處理時間，格式如 `2026-10-15 14:30:05.125`，由後端共用 IClock 提供；不使用 DB 主機預設時間猜測時區。原場次／截止業務時間由場次及快照另保留，不把今天操作的時間偽裝為過去。
+
+### `dbo.sdt_att_correction`：更正申請與處理進度
+
+一筆代表一位學生、某一實際場次的一次更正案件。未建立出席資料的漏記案件也能先保存；之後成功建立出席才回填 `attendance_sn`。同一學生／場次可以有多次案件，不在案件表上把這組欄位設為唯一；第一版反覆撤銷後再次補認轉 NeedsReview，不提供一鍵再次扣退，不因允許多筆案件就開放重複扣退。
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `correction_sn` | `bigint IDENTITY(1,1)` | 否 | 更正案件內部主鍵 |
+| `request_id` | `uniqueidentifier` | 否 | 唯一請求識別；前端／呼叫方對同一次送出及重試保留同一 GUID，不是授權憑證 |
+| `attendance_sn` | `int` | 是 | 邏輯對應 `sdt_att_record_sn`；漏記且尚無出席資料時可 NULL，Completed 時不可 NULL |
+| `user_id` | `nvarchar(50)` | 否 | 被更正的學生 ID，不是操作者 |
+| `cls_scdle_arnge_sn` | `int` | 否 | 被更正的實際場次，不用課程模板 ID |
+| `correction_type` | `varchar(30)` | 否 | `RevokeAttendance`＝撤銷誤判出席；`ConfirmAttendance`＝補認原本符合條件的漏記出席 |
+| `processing_state` | `varchar(20)` | 否 | `Pending`／`NeedsReview`／`Completed`／`Failed`／`Rejected`，見下方語意 |
+| `reason` | `nvarchar(500)` | 否 | 更正原因，必填且不得只有空白 |
+| `evidence_note` | `nvarchar(max)` | 是 | 歷史事件、調查依據與說明；不能只憑備註把不具資格者改成 Eligible |
+| `target_pass_sn` | `int` | 是 | 本案原固定票券或歷史核對後的目標票券；不能由任意挑選目前票券繞過歷史資格 |
+| `target_usage_sn` | `int` | 是 | 要整筆沖銷的原 Consume；與 `target_pass_sn` 一起定位，兼容文件目前的核銷複合主鍵描述；尚未扣堂或無堂數變動時可 NULL |
+| `requested_by` | `nvarchar(50)` | 否 | 建立案件的實際 Admin ID，不接受前端任意冒填 |
+| `processed_by` | `nvarchar(50)` | 是 | 最近實際處理的 Admin ID，可以與 requested_by 相同；Completed／Rejected 時必填 |
+| `requested_at` | `datetime2(3)` | 否 | 案件建立時間，台灣本地時間 |
+| `processed_at` | `datetime2(3)` | 是 | 最近實際處理時間；NeedsReview／Failed 重試時可更新，不是原上課時間 |
+| `updated_at` | `datetime2(3)` | 否 | 案件進度最後變更時間；建立時也須明確提供 |
+| `result_code` | `varchar(50)` | 是 | 可機器辨識的結果／阻擋代碼；完整代碼清單留應用契約設計 |
+| `result_message` | `nvarchar(500)` | 是 | 顯示處理結果、缺少依據或衝突原因；不寫密碼、token、連線字串或完整 exception |
+| `row_version` | `rowversion` | 否 | SQL Server 自動產生的 8-byte 並行控制值，不是日期；API 傳輸格式待契約設計 |
+
+狀態語意及執行限制：
+
+- `Pending`：案件已保存，尚未完成更正；不代表已准許扣堂或需要第二人簽核。
+- `NeedsReview`：歷史不足、已影響後續票券或資料衝突，須人工確認；不把它轉成 Ineligible 來結案，也不盲目自動重試。
+- `Completed`：本案所需的出席、占用／額度、核銷與稽核都已一致提交，不只代表開啟過畫面或送出過請求。
+- `Failed`：技術處理未完成，保存原因；是否可重試須重新核對最新狀態，不能繞過業務衝突。
+- `Rejected`：經確認不符合更正條件，保留案件與理由；不是「已退堂」。
+- 同一 `request_id` 重送須核對學生、場次、類型等請求內容：內容相同回傳既有案件／結果，內容不同拒絕，不能將唯一索引衝突當成執行成功。
+- 完成案件不可再次執行。對出席及額度操作前仍須鎖定相關資料／檢查版本並驗證狀態；案件唯一鍵不能單獨防止不同 request_id 重複退同一筆 Consume。
+- 案件的 `row_version` 只保護案件更新，不等於出席／票券資料也已具備並行控制；既有表的版本、鎖定及交易防線仍需設計。
+
+### `dbo.sdt_att_record_audit_log`：出席資料變動歷史
+
+一筆保存一次操作對某筆出席的變動前後快照。一般系統建立／更新出席亦可寫入，這時 `correction_sn` 為 NULL；人工更正需關聯案件。同次交易若對同筆出席多次內部更新，應彙整為一筆交易前／交易後的完整快照。
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `audit_sn` | `bigint IDENTITY(1,1)` | 否 | 稽核流水號 |
+| `attendance_sn` | `int` | 否 | 變動的出席主鍵；補認建立出席後即可取得，不能用 NULL 代替未處理案件 |
+| `correction_sn` | `bigint` | 是 | 人工更正案件；非更正的一般系統異動可 NULL |
+| `operation_id` | `uniqueidentifier` | 否 | 同一次實際操作的批次識別；串接多筆相關異動，不是裝置授權或 Admin token |
+| `change_type` | `varchar(20)` | 否 | `Insert`／`Update`；撤銷出席仍保留資料並寫 Update，不刪除出席 |
+| `change_source` | `varchar(50)` | 否 | 異動來源代碼，例如系統 A／B、人工更正；確切來源清單在應用設計時對齊，不由字串授予權限 |
+| `before_data` | `nvarchar(max)` | 是 | 異動前完整出席快照 JSON；Insert 時為 NULL，Update 時必須有值 |
+| `after_data` | `nvarchar(max)` | 否 | 異動後完整出席快照 JSON；保留欄位名稱、型別語意與 NULL，不放憑證 |
+| `operator_id` | `nvarchar(50)` | 否 | 人工更正記實際 Admin；系統異動可記 SYSTEM，並配合 change_source 區分 |
+| `reason` | `nvarchar(500)` | 否 | 變動原因；人工更正必須能對應案件原因，系統操作也保存可追溯說明 |
+| `changed_at` | `datetime2(3)` | 否 | 此次實際變動時間，不回填成課程截止時間 |
+
+- 快照使用 JSON 文字，不使用 SQL Server 新版原生 JSON 型別；以下 `ISJSON` 檢查需目標 SQL Server 支援。正式 migration 前核對版本。
+- 稽核快照不是機器判斷資格／扣堂的主要資料來源，不依解析 remark 決定結算；正式欄位、原事件、固定占用及核銷仍是依據。
+- Insert-only 是實作要求；以下 CREATE 不會自動阻擋 UPDATE／DELETE。須在應用寫入路徑及適當 DB 權限落實，不能在尚未配置權限前宣稱不可竄改。
+- 建議由具商業上下文的應用服務在同一交易寫入。是否增加 trigger 作額外防線仍待設計，本次不建立 trigger、不修改 DB 帳號權限，也不把新表當成既有 pass audit log 的替代品。
+- 尚未完成更正的案件不建立假的出席異動稽核；其原因保存在案件表。更正過程失敗而交易回滾時，出席稽核與額度／出席一同回滾，再以獨立處理保存失敗結果，不能將回滾的異動記為已成功。
+
+### CREATE TABLE／索引語法：出席更正與稽核
+
+以下是兩張新表的文件示例，不含既有出席／核銷表的 ALTER，不是可直接完成全部功能的 migration。`GO` 僅供 SSMS／sqlcmd 分批，不可原樣經 Dapper 當成一個 T-SQL 指令送出。沒有 DROP、UPDATE 既有資料或 INSERT 真實案件。
+
+```sql
+-- 文件示例：本次未執行。先核對目標 DB、SQL Server 版本及同名物件。
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
+CREATE TABLE dbo.sdt_att_correction
+(
+    correction_sn BIGINT IDENTITY(1,1) NOT NULL,
+    request_id UNIQUEIDENTIFIER NOT NULL,
+    attendance_sn INT NULL,
+    user_id NVARCHAR(50) NOT NULL,
+    cls_scdle_arnge_sn INT NOT NULL,
+    correction_type VARCHAR(30) NOT NULL,
+    processing_state VARCHAR(20) NOT NULL,
+    reason NVARCHAR(500) NOT NULL,
+    evidence_note NVARCHAR(MAX) NULL,
+    target_pass_sn INT NULL,
+    target_usage_sn INT NULL,
+    requested_by NVARCHAR(50) NOT NULL,
+    processed_by NVARCHAR(50) NULL,
+    requested_at DATETIME2(3) NOT NULL,
+    processed_at DATETIME2(3) NULL,
+    updated_at DATETIME2(3) NOT NULL,
+    result_code VARCHAR(50) NULL,
+    result_message NVARCHAR(500) NULL,
+    row_version ROWVERSION NOT NULL,
+
+    CONSTRAINT PK_sdt_att_correction PRIMARY KEY (correction_sn),
+    CONSTRAINT UQ_sdt_att_correction_request UNIQUE (request_id),
+    CONSTRAINT CK_sdt_att_correction_type
+        CHECK (correction_type IN ('RevokeAttendance', 'ConfirmAttendance')),
+    CONSTRAINT CK_sdt_att_correction_state
+        CHECK (processing_state IN
+               ('Pending', 'NeedsReview', 'Completed', 'Failed', 'Rejected')),
+    CONSTRAINT CK_sdt_att_correction_reason
+        CHECK (LEN(LTRIM(RTRIM(reason))) > 0),
+    CONSTRAINT CK_sdt_att_correction_target_usage
+        CHECK (target_usage_sn IS NULL OR target_pass_sn IS NOT NULL),
+    CONSTRAINT CK_sdt_att_correction_completed_attendance
+        CHECK (processing_state <> 'Completed' OR attendance_sn IS NOT NULL),
+    CONSTRAINT CK_sdt_att_correction_processed
+        CHECK (processing_state NOT IN ('Completed', 'Rejected')
+               OR (processed_by IS NOT NULL AND processed_at IS NOT NULL))
+);
+GO
+
+CREATE INDEX IX_sdt_att_correction_state_requested
+    ON dbo.sdt_att_correction (processing_state, requested_at, correction_sn);
+GO
+
+CREATE INDEX IX_sdt_att_correction_student_session
+    ON dbo.sdt_att_correction (user_id, cls_scdle_arnge_sn, correction_sn);
+GO
+
+CREATE TABLE dbo.sdt_att_record_audit_log
+(
+    audit_sn BIGINT IDENTITY(1,1) NOT NULL,
+    attendance_sn INT NOT NULL,
+    correction_sn BIGINT NULL,
+    operation_id UNIQUEIDENTIFIER NOT NULL,
+    change_type VARCHAR(20) NOT NULL,
+    change_source VARCHAR(50) NOT NULL,
+    before_data NVARCHAR(MAX) NULL,
+    after_data NVARCHAR(MAX) NOT NULL,
+    operator_id NVARCHAR(50) NOT NULL,
+    reason NVARCHAR(500) NOT NULL,
+    changed_at DATETIME2(3) NOT NULL,
+
+    CONSTRAINT PK_sdt_att_record_audit_log PRIMARY KEY (audit_sn),
+    CONSTRAINT UQ_sdt_att_record_audit_operation
+        UNIQUE (operation_id, attendance_sn),
+    CONSTRAINT CK_sdt_att_record_audit_change_type
+        CHECK (change_type IN ('Insert', 'Update')),
+    CONSTRAINT CK_sdt_att_record_audit_before_json
+        CHECK (before_data IS NULL OR ISJSON(before_data) = 1),
+    CONSTRAINT CK_sdt_att_record_audit_after_json
+        CHECK (ISJSON(after_data) = 1),
+    CONSTRAINT CK_sdt_att_record_audit_snapshot
+        CHECK ((change_type = 'Insert' AND before_data IS NULL)
+               OR (change_type = 'Update' AND before_data IS NOT NULL)),
+    CONSTRAINT CK_sdt_att_record_audit_reason
+        CHECK (LEN(LTRIM(RTRIM(reason))) > 0)
+);
+GO
+
+CREATE INDEX IX_sdt_att_record_audit_attendance_time
+    ON dbo.sdt_att_record_audit_log (attendance_sn, changed_at, audit_sn);
+GO
+
+CREATE INDEX IX_sdt_att_record_audit_correction
+    ON dbo.sdt_att_record_audit_log (correction_sn, audit_sn);
+GO
+```
+
+### 尚待完成的既有表及交易整合（不是本次 ALTER）
+
+- `sdt_att_record` 的撤銷狀態、`settlement_state`、有效核銷關聯、資料版本及學生＋實際場次唯一性仍需正式設計／migration；不得只因建立案件／稽核表就宣稱可安全退堂。原有 CheckOut 不等於撤銷出席。
+- `sdt_ticket_usage_log` 的實際 schema 尚須重查；本文件已有 Consume／Reverse、attendance_sn、idempotency_key 及快照不代表 GymDB 均已存在。原文複合主鍵與 usage_sn 唯一性須對齊，本次先以 target_pass_sn＋target_usage_sn 記原核銷，不擅自更換既有主鍵。
+- 核銷需補齊與更正案件的可追溯關聯、防重請求唯一性及同一原 Consume 最多整筆沖銷一次的 DB／交易防線；僅在這兩張新表設唯一鍵不能保證不重複扣退堂。若核銷維持複合識別，沖銷關聯也必須能唯一定位原筆。
+- 同一學生／場次的有效扣堂唯一性仍待技術設計；已沖銷後再次補認的反覆更正已確認第一版轉 NeedsReview、不一鍵再次扣退，不以多筆案件或更換 request_id 繞過「不重複扣堂」。
+- 成功更正須將出席、占用釋放／恢復、額度、Consume／Reverse、出席稽核及案件完成標記放入一致的交易；正式送出前重驗最新狀態與歷史資格，不能只依畫面預覽結果執行。
+- 已影響接續票券、歷史依據不足及資料衝突，保存 NeedsReview 原因，不先做部分退堂或改啟用狀態；原已完成的扣堂也不透過背景工作整批重跑來更正。
+- 稽核新增與案件更新尚需統一寫入服務、並行鎖定、權限及測試；完整額度占用／工作進度表、館內狀態更正稽核和對帳機制仍屬後續設計範圍，不由本節兩張表取代。
+- 第一版正式入口為學生詳細頁，Schedule 不加入結算操作，獨立 Classes 列後續；Admin 確認並重新處理後須重驗，上一堂修復成功才依序恢復後續未完成工作。台灣午夜換日／當日重新確認只影響當日館內依據，歷史 A／B 仍依原場次歷史補跑；這些規則不代表本節已新增館內狀態或背景工作表。
