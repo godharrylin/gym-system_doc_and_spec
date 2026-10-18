@@ -6,6 +6,8 @@
 
 依據：[規格](../gym-io-behavior-spec.md)、[issue](../issue/gym-io-issues.md)。
 
+資料庫部署更新（2026-10-17）：使用者核准後已套用 [A／B 工作表 SQL](sql/01-create-class-processing.sql)，class_processing_job／class_processing_item 已建立，提交後欄位、索引及約束查核通過，兩表均為 0 筆，沒有 FK 或 rowversion。後續亦已部署占用表並通過 9 個 SQL 整合測試；建表完成不代表 Coordinator／Worker／A／B 已實作或驗收。詳見 [第四階段實作狀態](../04-出席確認與額度占用/current/implementation-status.md)。
+
 ## 目標與範圍
 
 實作下課十分鐘後的 B 及可恢復的 A／B 背景工作框架，將堂票占用正式結算，避免漏扣或重複扣。

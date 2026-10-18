@@ -264,33 +264,82 @@
     - 2026-10-06 同步已確認行為：緩衝期可建立 Pending／暫占資料；正式出席以「課程開始＋十分鐘」截止時的館內狀態確認，不是每個人進場後各等十分鐘。占用儲存與資料建立細節仍待設計，這裡不代表 DB 已完成變更。
     - 截止前離場未回者不成立出席並釋放暫占；確認後中途離場仍保留出席及固定占用，離場／返回另查進出紀錄。
     - 缺票留館保存事實及 Ineligible／remark，不欠堂、不扣負數、不補結算，也不授予同堂回場資格。
+    - 2026-10-16 使用者決策：出席／額度占用相關資料表不建立外鍵；關聯完整性由程式端驗證與交易流程維護。此決策不排除主鍵、唯一索引、check constraint 等資料表內部防線。
+    - 2026-10-16 唯讀資料品質查核：刪除前共 1 筆，必要關聯欄位無 NULL、學生＋場次無重複；該筆會員與票券 ID 無對應資料、場次仍存在。依使用者明確指示，在確認無其他資料表引用後，以單一交易刪除該筆並確認此表剩 0 筆；未另存副本。
+    - 2026-10-16 唯讀查核 GymDB：此表已存在；目前欄位型別為 `sdt_att_record_sn int`、`user_id nvarchar(50) NULL`、`cls_scdle_arnge_sn int NULL`、`sdt_att_record_ticket_id nvarchar(50) NULL`、`sdt_att_record_status nvarchar(20) NULL`、check-in/out `datetime NULL`、remark `nvarchar(max) NULL`、upd_source／upd_by_staff `nvarchar(50) NULL`、upd_date `datetime NULL`。目前僅查到主鍵，未查到學生＋場次唯一索引、外鍵或 check constraint。
+    - 2026-10-17 使用者核准後，已套用 [保留資料的 ALTER](spec/IO_gyms/04-出席確認與額度占用/sql/02-align-attendance.sql)：新增 `sdt_att_record_ticket_eligibility_state varchar(20) NULL`、`sdt_att_record_create_dt datetime2(3) NOT NULL`；user_id／場次／狀態／更新時間改為 NOT NULL，進出與更新時間改為 datetime2(3)，新增學生＋場次唯一索引及場次狀態查詢索引。執行前後均為 0 筆，不曾刪除或回填資料，沒有 FK、rowversion 或新增 CHECK。下方 CREATE 仍為新庫目標草案，其 CHECK 不代表本次已部署；實際舊庫沿用原主鍵名稱，不刪表重建。
+    - 以下 ID 關聯先採邏輯關聯、不建立 FK，延續現有更正資料表設計原則；正式 migration 前仍須檢查既有資料與完整索引／約束。
+
+    **CREATE TABLE 草案（文件用，未執行）**
+
+    ```sql
+    CREATE TABLE dbo.sdt_att_record
+    (
+        sdt_att_record_sn INT IDENTITY(1,1) NOT NULL,
+        user_id NVARCHAR(50) NOT NULL,
+        cls_scdle_arnge_sn INT NOT NULL,
+        -- 儲存 sdt_ticket_pass.pass_id；Pending 期間可對應暫占票券，A 確認後固定為該堂票券。
+        sdt_att_record_ticket_id NVARCHAR(50) NULL,
+        -- Attendance fact state; eligibility and credit reservation are separate dimensions.
+        sdt_att_record_status NVARCHAR(20) NOT NULL,
+        sdt_att_record_ticket_eligibility_state VARCHAR(20) NULL,
+        -- Summary timestamps only. device_record remains the source for reconstructing presence.
+        sdt_att_record_chk_in_time DATETIME2(3) NULL,
+        sdt_att_record_chk_out_time DATETIME2(3) NULL,
+        sdt_att_record_remark NVARCHAR(MAX) NULL,
+        sdt_att_record_upd_source NVARCHAR(50) NULL,
+        sdt_att_record_upd_by_staff NVARCHAR(50) NULL,
+        sdt_att_record_create_dt DATETIME2(3) NOT NULL,
+        sdt_att_record_upd_date DATETIME2(3) NOT NULL,
+        CONSTRAINT PK_sdt_att_record
+            PRIMARY KEY (sdt_att_record_sn),
+        CONSTRAINT UQ_sdt_att_record_user_session
+            UNIQUE (user_id, cls_scdle_arnge_sn),
+        CONSTRAINT CK_sdt_att_record_status
+            CHECK (sdt_att_record_status IN
+                   ('Pending', 'CheckIn', 'CheckOut', 'Cancelled', 'NeedsReview')),
+        CONSTRAINT CK_sdt_att_record_ticket_eligibility
+            CHECK (sdt_att_record_ticket_eligibility_state IS NULL
+                   OR sdt_att_record_ticket_eligibility_state IN ('Eligible', 'Ineligible'))
+    );
+
+    CREATE INDEX IX_sdt_att_record_session_status
+        ON dbo.sdt_att_record (cls_scdle_arnge_sn, sdt_att_record_status, user_id);
+
+    ```
+
+    **草案待確認事項：** `Cancelled`（截止前預參加取消）及 `NeedsReview`（進出事件不明、待人工確認）狀態碼、欄位 nullability、時間欄位是否保留摘要值、更新來源代碼，須在 migration 及 API／A 流程設計時確認。GymDB 目前的 `sdt_att_record_ticket_id` 為 `nvarchar(50)`，目標草案沿用並以 `sdt_ticket_pass.pass_id` 作邏輯對應；獨立占用表則建議使用 `pass_sn int` 作內部關聯鍵。`sdt_att_record_ticket_id` 不作為占用狀態；獨立占用表才是堂票暫占／固定／釋放／扣堂狀態依據。
+
+    **`rowversion` 決策說明：** 目前未納入 GymDB migration／上方目標 DDL。它不能阻止更新或避免版本遞增；只有更新語句比對讀取時的舊版本值，才可偵測並拒絕過期寫入、避免靜默覆蓋。即使欄位值未變的 UPDATE，SQL Server 仍會改變 rowversion，因此程式仍應避免無效 UPDATE，並處理並行衝突。若後續決定採用樂觀並行控制，須一併改造所有更新路徑；額度加總與占用競態仍需交易鎖及唯一索引。
     
     | **欄位名稱** | **資料類型** | **說明** |
     | --- | --- | --- |
     | **`sdt_att_record_sn`** | int | 出席流水號 |
-    | **`user_id`** | Foreign Key | 使用者編號，關連到`user`表，用它來驗證身份。 |
-    | **`cls_scdle_arnge_sn`** | Foreign Key | 課程編號，關連到`cls_scdle_arnge`表 |
-    | **`sdt_att_record_ticket_id`** | 票券關聯 | 出席截止時整理後固定的該堂票券，B 不依當下 Current Plan 重選；缺票可為 NULL，不強填已耗盡舊票。實際型別／約束需查 DB |
-    | **`sdt_att_record_status`** | varChar | 出席狀態
+    | **`user_id`** | `nvarchar(50) NOT NULL` | 邏輯關聯 `users.usr_id`；無外鍵，已部署學生＋場次唯一索引。 |
+    | **`cls_scdle_arnge_sn`** | `int NOT NULL` | 邏輯關聯 `cls_scdle_arnge.cls_scdle_arnge_sn`；無外鍵。 |
+    | **`sdt_att_record_ticket_id`** | `nvarchar(50)`（目前允許 NULL） | 現況存票券 ID 字串，目標以 `sdt_ticket_pass.pass_id` 邏輯關聯。A 固定該堂票券，B 不依當下 Current Plan 重選；缺票可為 NULL。 |
+    | **`sdt_att_record_status`** | `nvarchar(20) NOT NULL` | 出席狀態
     • `Pending`: 緩衝期內，出席尚未確認。中途離場則保留已確認出席、另查進出紀錄
     • `CheckIn`(已簽到)：在「開課＋十分鐘」截止時仍在館內，確認該堂出席事實；合法票券資格另外看 eligibility_state，不以 CheckIn 單獨授權或扣堂。
     • `CheckOut`(已簽退)，課程結束後，有簽退會是這個狀態。 |
-    | **`sdt_att_record_ticket_eligibility_state`** | varchar(20) | **該學生在「該課程出席確認時」的票券資格狀態。**
+    | **`sdt_att_record_ticket_eligibility_state`** | `varchar(20) NULL` | **該學生在「該課程出席確認時」的票券資格狀態。欄位於 2026-10-17 已部署，A 資格確認程式尚未串接。**
       •  `Eligible` : 有符合規則的票券；堂票已成功占用額度
       • `Ineligible`: 沒有可用票券，或沒有足夠可占用額度 |
-    | **`sdt_att_record_chk_in_time`** | DateTime | 簽到 |
-    | **`sdt_att_record_chk_out_time`** | DateTime | 簽退 |
-    | **`sdt_att_record_remark`** | varChar (Nullable) | 備註 |
-    | **`sdt_att_record_upd_source`** | varChar | 異動來源
+    | **`sdt_att_record_chk_in_time`** | `datetime2(3) NULL` | 簽到摘要時間；還原進出仍以 `device_record` 為準。 |
+    | **`sdt_att_record_chk_out_time`** | `datetime2(3) NULL` | 簽退摘要時間；還原進出仍以 `device_record` 為準。 |
+    | **`sdt_att_record_remark`** | `nvarchar(max)`（目前允許 NULL） | 備註 |
+    | **`sdt_att_record_upd_source`** | `nvarchar(50)`（目前允許 NULL） | 異動來源
     • `Costumer_Click` (客人點擊)
     • `System_ForgotCheckout` (系統更新)
     • `Staff_Manual` (員工手動補登) |
-    | **`sdt_att_record_upd_by_staff`** | varChar | 如果是員工補登，此欄位會顯示員工的id |
-    | **`sdt_att_record_upd_date`** | DateTime | 資料異動時間 |
+    | **`sdt_att_record_upd_by_staff`** | `nvarchar(50)`（目前允許 NULL） | 如果是員工補登，此欄位會顯示員工的id |
+    | **`sdt_att_record_create_dt`** | `datetime2(3) NOT NULL` | 實際建立時間，台灣本地時間；2026-10-17 新增於空表，沒有回填歷史。 |
+    | **`sdt_att_record_upd_date`** | `datetime2(3) NOT NULL` | 資料異動時間，台灣本地時間。 |
     
 - 票券核銷表 **`sdt_ticket_usage_log`**
     - 學生票券的使用紀錄，Insert only
     - `usage_sn` , `pass_sn` 做為複合主鍵
+    - 2026-10-16 唯讀查核 GymDB：實際欄位為 `usage_sn int`（PK）、`pass_id nvarchar(50)`、`usage_dt datetime`、`usage_type nvarchar(50)`、`deducted_credits int`、`rem_credits_snapshot int`、`operator_id nvarchar(50)`、`remark nvarchar(max)`；尚未查到 `attendance_sn`、`idempotency_key`、`usage_action` 或對應 Consume／Reverse 欄位。下表中未出現在此清單的欄位是設計／目標描述，不代表 GymDB 已部署。
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
@@ -1294,8 +1343,15 @@
     | **`remark`** | NVarChar(500) | 非敏感異常說明，不存 Cookie／配對碼／電話 | 結果不明原因 |
     | **`affects_presence`** | Bit | 1 才能作館內狀態推導事件；失敗、拒絕、Unknown、Mock 必須為 0 | 1 |
     | **`is_simulated`** | Bit | 是否由 Turnstile Mock 產生；Mock 成功不等於實際進出 | 0 |
+    | **`attendance_sn`** | Int NULL | 第四階段：此次開門準備對應的出席主鍵；邏輯關聯，不設外鍵 | 123 |
+    | **`reservation_sn`** | BigInt NULL | 此次使用的占用；月票無占用時為 NULL；是否由本次建立另看下方旗標 | 456 |
+    | **`admission_kind`** | VarChar(20) NULL | `RegularEntry`／`PreEntry`／`Return`；不是自由文字授權原因 | RegularEntry |
+    | **`created_pending`** | Bit NULL | 本次是否新建／恢復 Pending；失敗時不得取消先前有效參加 | 1 |
+    | **`created_reservation`** | Bit NULL | 本次是否新建占用；失敗只處理自己的新占用，不能釋放他次請求占用 | 1 |
 
     實際變更腳本：[第二階段 device_record 擴充](spec/IO_gyms/02-開門控制與進出紀錄/sql/02-extend-device-record.sql)。館內狀態第一版由每位使用者最後一筆 `affects_presence = 1` 的成功進／出事件推導；`sdt_profile_cur_visit_at` 仍只是學生最近成功進場時間，不單獨代表目前在館內。
+
+    2026-10-17 已在開發／測試 GymDB 套用[第四階段開門關聯欄位](spec/IO_gyms/04-出席確認與額度占用/sql/03-link-gate-request-attendance.sql)：以上 5 欄均可 NULL，無新外鍵、CHECK、rowversion 或預設值，既有進出紀錄不回填、不改寫。舊紀錄全 NULL 表示沒有此階段準備上下文；已填 attendance_sn 卻缺少種類／旗標時視為資料不完整，不把 NULL 猜成 false。
 
 ## 進出站點與瀏覽器授權（第二階段資料設計）
 
@@ -1615,3 +1671,309 @@ GO
 - 已影響接續票券、歷史依據不足及資料衝突，保存 NeedsReview 原因，不先做部分退堂或改啟用狀態；原已完成的扣堂也不透過背景工作整批重跑來更正。
 - 稽核新增與案件更新尚需統一寫入服務、並行鎖定、權限及測試；完整額度占用／工作進度表、館內狀態更正稽核和對帳機制仍屬後續設計範圍，不由本節兩張表取代。
 - 第一版正式入口為學生詳細頁，Schedule 不加入結算操作，獨立 Classes 列後續；Admin 確認並重新處理後須重驗，上一堂修復成功才依序恢復後續未完成工作。台灣午夜換日／當日重新確認只影響當日館內依據，歷史 A／B 仍依原場次歷史補跑；這些規則不代表本節已新增館內狀態或背景工作表。
+
+## 課程出席背景工作資料設計（第四／第五階段）
+
+整理日期：2026-10-16。使用者已同意新增 `class_processing_job` 與 `class_processing_item`。相關規劃：[出席確認與額度占用](spec/IO_gyms/04-出席確認與額度占用/impelment_rule.md)、[課程結算與背景工作](spec/IO_gyms/05-課程結算與背景工作/impelment_rule.md)。
+
+**資料庫狀態：2026-10-17 使用者核准後，以下兩張工作表已在開發 GymDB 建立並提交，欄位及索引已唯讀查核；背景工作程式仍未實作。** 這兩張表保存工作進度，不取代出席表、額度占用表或扣堂紀錄。部署至其他環境前仍須核對同名物件及關聯欄位，不刪表重建。
+
+2026-10-17 已依本節語法套用 [工作表建置腳本](spec/IO_gyms/05-課程結算與背景工作/sql/01-create-class-processing.sql)，與出席 ALTER 在同一外層交易提交；job 20 欄、item 15 欄，目前均為 0 筆，兩表各有 6 個 CHECK、沒有外鍵或 rowversion。占用表移除 CHECK 的決策未擴大到這兩張表。後續繼續第四階段時，亦已另行部署占用表並完成 9 個 SQL 整合測試；建表不代表 Worker／A／B 程式已完成。
+
+### 已確認的規則與資料分工
+
+- 程式功能目錄命名 `ClassAttendanceProcessing`。Application 層的 Coordinator 協調 A／B 與票券接續，Infrastructure 層的 Worker 找出到期工作及取得執行權；只使用一套背景工作入口。
+- A 在開課十分鐘截止後確認出席、固定票券與占用；B 在下課十分鐘後正式結算。包含截止整點的事件收齊後才能封存，不能把 A 延到下課後才首次執行。
+- 一個場次各有一筆 A、B 工作；每筆工作再分成每學生一筆處理項目。同堂一人失敗不回滾其他已完成學生，也不能只靠整堂的 Completed 判斷某學生是否已扣堂。
+- 相鄰場次先上一堂 B、接續票券，再下一堂 A；上一堂未完成者只暫停該學生。Coordinator 必須驗證依賴，不單靠工作時間排序或等待整班完成。
+- 不新增外鍵、不使用 `rowversion`。關聯存在性、學生／場次一致性、執行權及狀態轉換由應用服務在交易內重驗；PK、唯一索引與 CHECK 作額外防線。
+- 所有 `datetime2(3)` 保存台灣本地時間，例如 `2026-10-16 19:10:00.000`，由後端共用 IClock 明確提供。預定時間、業務快照與實際處理時間分開；不使用資料庫主機的預設時間猜測時區。
+- `lease_token` 是每次取得工作時重新產生的 GUID，不是裝置／使用者授權憑證。舊 Worker 不能只憑相同 worker 名稱繼續寫入。
+
+### `dbo.class_processing_job`：每場次 A／B 工作
+
+一筆代表一個實際場次的一個處理階段。建立時保存場次時間及老師快照；開始上課後依既有規則禁止編輯場次，不能靠修改工作快照繞過此限制。開課前允許的排課異動須同步重算尚未執行的工作；取消場次須在場次驗證及工作處理路徑明確處理，不能留下可執行的過期工作。
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `job_sn` | `bigint IDENTITY(1,1)` | 否 | 工作主鍵 |
+| `cls_scdle_arnge_sn` | `int` | 否 | 實際課程場次，邏輯對應既有場次表 |
+| `phase` | `varchar(1)` | 否 | `A`＝出席確認；`B`＝課程結算 |
+| `processing_state` | `varchar(20)` | 否 | `Pending`／`Running`／`Waiting`／`NeedsReview`／`Failed`／`Completed`／`Cancelled` |
+| `class_start_at` | `datetime2(3)` | 否 | 原場次開始時間快照 |
+| `class_end_at` | `datetime2(3)` | 否 | 原場次結束時間快照；課程造成耗盡時供業務 ended_at 使用 |
+| `instructor_id` | `nvarchar(50)` | 否 | 該場次老師 ID 快照；部署前核對既有老師識別欄位 |
+| `scheduled_at` | `datetime2(3)` | 否 | 原應執行時間：A＝開始＋十分鐘，B＝結束＋十分鐘；重試不覆寫 |
+| `processing_attempts` | `int` | 否 | 成功取得工作執行權的累計次數，初值 0；輪詢但未取得執行權不增加 |
+| `next_attempt_at` | `datetime2(3)` | 是 | 下次可自動嘗試時間；人工待確認不得只靠此欄位自動重跑 |
+| `lease_owner` | `nvarchar(100)` | 是 | 持有執行權的服務實例／Worker 識別，不保存密碼或 token |
+| `lease_token` | `uniqueidentifier` | 是 | 本次執行權識別，每次重新取得都換新值 |
+| `lease_expires_at` | `datetime2(3)` | 是 | 執行權到期時間；長工作須條件式續租 |
+| `first_started_at` | `datetime2(3)` | 是 | 第一次實際開始處理時間 |
+| `last_started_at` | `datetime2(3)` | 是 | 最近一次取得執行權的時間 |
+| `completed_at` | `datetime2(3)` | 是 | 整個工作確實完成的時間；有未完成學生時不可填成已完成 |
+| `last_error_code` | `varchar(60)` | 是 | 最近一次技術／資料錯誤代碼 |
+| `last_error_message` | `nvarchar(1000)` | 是 | 最近一次原因摘要，不存完整 exception 或連線資訊 |
+| `created_at` | `datetime2(3)` | 否 | 工作建立時間 |
+| `updated_at` | `datetime2(3)` | 否 | 工作最近狀態變更時間 |
+
+工作狀態語意：
+
+- `Pending`：尚未執行；`scheduled_at` 之前不能執行業務處理。
+- `Running`：已取得有期限的執行權；資料庫租約只管工作取得，仍須交易鎖與條件更新保護實際資料。
+- `Waiting`：已有部分完成，但仍有待執行／依賴尚未解除的項目；下次只處理未完成者。
+- `NeedsReview`：目前剩餘項目需人工確認；其他可處理者應先繼續，不能一遇人工案件就停止整班。
+- `Failed`：工作層技術錯誤，保留原因，依退避策略重試；既有 Completed 項目保留。
+- `Completed`：名單已可靠封存，所有必要項目均 Completed 或有明確理由的 Skipped。名單查詢失敗／尚未封存不能因目前零筆 item 就宣告完成；確定無出席學生時可完成。
+- `Cancelled`：開課前取消場次、且未執行出席／扣堂的工作；不拿此狀態取消已成立出席或沖銷扣堂。
+
+### `dbo.class_processing_item`：逐學生處理進度
+
+一筆代表一位學生在某一 A／B 工作的進度。A 可先保存待確認項目，尚無出席主鍵時 `attendance_sn` 可為 NULL；B 成功結算須關聯固定的出席及占用，不能到結算時重新挑 Current Plan。工作明細不是占用本身，不在此表另存一份可扣額度。
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `item_sn` | `bigint IDENTITY(1,1)` | 否 | 學生處理項目主鍵 |
+| `job_sn` | `bigint` | 否 | 所屬工作；透過 job 判斷場次與 A／B，不重複存一份可能不一致的 phase |
+| `user_id` | `nvarchar(50)` | 否 | 該學生 ID，不使用電話作識別鍵 |
+| `attendance_sn` | `int` | 是 | 邏輯對應出席主鍵；缺歷史待確認或確認無出席時可 NULL |
+| `processing_state` | `varchar(20)` | 否 | `Pending`／`Running`／`Blocked`／`NeedsReview`／`Failed`／`Completed`／`Skipped` |
+| `blocked_by_item_sn` | `bigint` | 是 | 阻擋此學生的上一個未完成項目，限同學生且較前的業務依賴；不可自指或形成循環 |
+| `processing_attempts` | `int` | 否 | 此項目實際處理次數，初值 0；不能以整堂 attempts 代替 |
+| `next_attempt_at` | `datetime2(3)` | 是 | 暫時性失敗下次可自動重試的時間 |
+| `first_started_at` | `datetime2(3)` | 是 | 此學生項目第一次實際開始時間 |
+| `last_started_at` | `datetime2(3)` | 是 | 最近一次實際嘗試時間 |
+| `completed_at` | `datetime2(3)` | 是 | Completed／Skipped 實際完成時間 |
+| `result_code` | `varchar(60)` | 是 | 成功、略過、暫停或異常代碼；不能只依 remark 判定狀態 |
+| `result_message` | `nvarchar(1000)` | 是 | 原因摘要；區分歷史不足、結算故障及票券不具資格 |
+| `created_at` | `datetime2(3)` | 否 | 項目建立時間 |
+| `updated_at` | `datetime2(3)` | 否 | 項目最近狀態變更時間 |
+
+- `Pending`／`Running`：尚未處理／正在父工作有效租約下處理。恢復時不得單憑 Running 就認定已扣堂，也不能直接再扣。
+- `Blocked`：同一學生前置工作未完成；保存阻擋項目，不能改成 Ineligible。前置修復後重新驗證，再恢復處理。
+- `NeedsReview`：歷史不完整、Requested／Unknown 事件無法釐清、固定占用衝突等；不推測出席、不換票、不盲目重試。
+- `Failed`：暫時性技術錯誤，交易已回滾；保存原因及下次重試時間。超過技術重試上限後保留異常供人工處理。
+- `Completed`：該階段對該學生所需資料均已一致提交；A 確認缺票留館的出席事實也可完成，但票券資格另記 Ineligible，不能由此授予回場或允許扣堂。
+- `Skipped`：有依據可確認不需執行，例如截止前已離場，或 B 遇到不允許補結算的 Ineligible。須有結果原因；系統失敗／缺歷史不得標成 Skipped。
+- 本表不新增每學生的第二套租約；逐筆處理、錯誤保存及恢復均驗證父 job 的 token／期限。父租約到期後接手者先核對交易結果，再恢復未完成項目。
+
+### CREATE TABLE／索引語法：背景工作與逐學生進度
+
+以下為工作表定義；2026-10-17 已透過獨立腳本部署至開發 GymDB。此處 `GO` 供 SSMS／sqlcmd 分批，不可直接將含 GO 的全文送入 Dapper。不含額度占用表、既有出席／核銷表 ALTER，也不建立外鍵或 rowversion。
+
+```sql
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
+CREATE TABLE dbo.class_processing_job
+(
+    job_sn BIGINT IDENTITY(1,1) NOT NULL,
+    cls_scdle_arnge_sn INT NOT NULL,
+    phase VARCHAR(1) NOT NULL,
+    processing_state VARCHAR(20) NOT NULL,
+    class_start_at DATETIME2(3) NOT NULL,
+    class_end_at DATETIME2(3) NOT NULL,
+    instructor_id NVARCHAR(50) NOT NULL,
+    scheduled_at DATETIME2(3) NOT NULL,
+    processing_attempts INT NOT NULL
+        CONSTRAINT DF_class_processing_job_attempts DEFAULT (0),
+    next_attempt_at DATETIME2(3) NULL,
+    lease_owner NVARCHAR(100) NULL,
+    lease_token UNIQUEIDENTIFIER NULL,
+    lease_expires_at DATETIME2(3) NULL,
+    first_started_at DATETIME2(3) NULL,
+    last_started_at DATETIME2(3) NULL,
+    completed_at DATETIME2(3) NULL,
+    last_error_code VARCHAR(60) NULL,
+    last_error_message NVARCHAR(1000) NULL,
+    created_at DATETIME2(3) NOT NULL,
+    updated_at DATETIME2(3) NOT NULL,
+
+    CONSTRAINT PK_class_processing_job PRIMARY KEY (job_sn),
+    CONSTRAINT UQ_class_processing_job_session_phase
+        UNIQUE (cls_scdle_arnge_sn, phase),
+    CONSTRAINT CK_class_processing_job_phase CHECK (phase IN ('A', 'B')),
+    CONSTRAINT CK_class_processing_job_state
+        CHECK (processing_state IN
+               ('Pending', 'Running', 'Waiting', 'NeedsReview', 'Failed', 'Completed', 'Cancelled')),
+    CONSTRAINT CK_class_processing_job_attempts CHECK (processing_attempts >= 0),
+    CONSTRAINT CK_class_processing_job_schedule
+        CHECK (class_end_at > class_start_at
+               AND ((phase = 'A' AND scheduled_at = DATEADD(MINUTE, 10, class_start_at))
+                 OR (phase = 'B' AND scheduled_at = DATEADD(MINUTE, 10, class_end_at)))),
+    CONSTRAINT CK_class_processing_job_lease
+        CHECK ((processing_state = 'Running' AND lease_owner IS NOT NULL
+                AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+            OR (processing_state <> 'Running' AND lease_owner IS NULL
+                AND lease_token IS NULL AND lease_expires_at IS NULL)),
+    CONSTRAINT CK_class_processing_job_completed
+        CHECK ((processing_state = 'Completed' AND completed_at IS NOT NULL)
+            OR (processing_state <> 'Completed' AND completed_at IS NULL))
+);
+GO
+
+CREATE INDEX IX_class_processing_job_due
+    ON dbo.class_processing_job (processing_state, scheduled_at, job_sn)
+    INCLUDE (next_attempt_at, lease_expires_at, cls_scdle_arnge_sn, phase);
+GO
+
+CREATE TABLE dbo.class_processing_item
+(
+    item_sn BIGINT IDENTITY(1,1) NOT NULL,
+    job_sn BIGINT NOT NULL,
+    user_id NVARCHAR(50) NOT NULL,
+    attendance_sn INT NULL,
+    processing_state VARCHAR(20) NOT NULL,
+    blocked_by_item_sn BIGINT NULL,
+    processing_attempts INT NOT NULL
+        CONSTRAINT DF_class_processing_item_attempts DEFAULT (0),
+    next_attempt_at DATETIME2(3) NULL,
+    first_started_at DATETIME2(3) NULL,
+    last_started_at DATETIME2(3) NULL,
+    completed_at DATETIME2(3) NULL,
+    result_code VARCHAR(60) NULL,
+    result_message NVARCHAR(1000) NULL,
+    created_at DATETIME2(3) NOT NULL,
+    updated_at DATETIME2(3) NOT NULL,
+
+    CONSTRAINT PK_class_processing_item PRIMARY KEY (item_sn),
+    CONSTRAINT UQ_class_processing_item_job_user UNIQUE (job_sn, user_id),
+    CONSTRAINT CK_class_processing_item_state
+        CHECK (processing_state IN
+               ('Pending', 'Running', 'Blocked', 'NeedsReview', 'Failed', 'Completed', 'Skipped')),
+    CONSTRAINT CK_class_processing_item_attempts CHECK (processing_attempts >= 0),
+    CONSTRAINT CK_class_processing_item_blocked
+        CHECK ((processing_state = 'Blocked' AND blocked_by_item_sn IS NOT NULL)
+            OR (processing_state <> 'Blocked' AND blocked_by_item_sn IS NULL)),
+    CONSTRAINT CK_class_processing_item_no_self_block
+        CHECK (blocked_by_item_sn IS NULL OR blocked_by_item_sn <> item_sn),
+    CONSTRAINT CK_class_processing_item_completed
+        CHECK ((processing_state IN ('Completed', 'Skipped') AND completed_at IS NOT NULL)
+            OR (processing_state NOT IN ('Completed', 'Skipped') AND completed_at IS NULL)),
+    CONSTRAINT CK_class_processing_item_skip_reason
+        CHECK (processing_state <> 'Skipped'
+               OR (result_code IS NOT NULL AND result_message IS NOT NULL
+                   AND LEN(LTRIM(RTRIM(result_message))) > 0))
+);
+GO
+
+CREATE INDEX IX_class_processing_item_job_state
+    ON dbo.class_processing_item (job_sn, processing_state, item_sn)
+    INCLUDE (user_id, attendance_sn, next_attempt_at);
+GO
+
+CREATE INDEX IX_class_processing_item_student_state
+    ON dbo.class_processing_item (user_id, processing_state, job_sn)
+    INCLUDE (attendance_sn, blocked_by_item_sn);
+GO
+
+CREATE INDEX IX_class_processing_item_blocked_by
+    ON dbo.class_processing_item (blocked_by_item_sn, item_sn)
+    WHERE blocked_by_item_sn IS NOT NULL;
+GO
+```
+
+### 交易、執行權及恢復要求
+
+1. 取得／續租工作使用短交易與條件更新，原子性確認狀態、scheduled_at、next_attempt_at 及舊租約到期；取得成功才寫入新 token。不能先 SELECT 後無條件 UPDATE。
+2. 每位學生各自一筆交易，不把全班放在同一交易。統一取得鎖的順序為工作執行權／相關場次 → 學生 profile → 依 pass_sn 排序的票券 → 出席／占用／核銷／處理項目；涉及多個同類資源依穩定識別排序。購票、取消、人工更正等共用學生／票券鎖的路徑須一併核對，避免反向取得鎖。
+3. 每筆業務交易先鎖定父工作並確認仍為 Running、token 相同且租約有效，持有鎖到提交；條件不符就停止舊 Worker。新 Worker 不得跳過尚持鎖的交易自行接手。不得在持有 DB 交易時等待硬體網路回應。
+4. B 的扣堂、核銷、占用轉 Consumed、必要的票券生命週期／profile 更新及 item Completed 必須一起提交；任何一步失敗整筆 rollback。A 的固定出席／占用及 item 完成亦同。不能先完成 item 再扣堂。
+5. rollback 後，另開短交易驗證 token 及項目仍未完成，再保存 Failed／NeedsReview、次數與原因；不得在已回滾的交易內保存失敗，也不得用晚到的錯誤覆蓋新 Worker 已提交的結果。
+6. 項目 Completed／Skipped 後不由自動重試改回 Pending。整堂重跑只接續未完成項目；人工更正走獨立更正案件。前置未完成只 Blocked 該學生，其他學生持續。
+7. 兩張表的唯一鍵只防止重複工作／明細，不能單獨保證不重複占用或扣堂；占用表、出席唯一性及核銷冪等限制仍須完成。補跑使用原截止歷史、原可用且已付款票券；不能拿現在館內名單或事後付款替代。
+8. attempts 與 last/result 欄位只保存累計次數及最近原因，不是每次嘗試的完整歷史。每次處理另以 job_sn、item_sn、lease_token 作結構化日誌關聯；完整重試稽核的保存方式須在第五階段實作時補齊，不宣稱這兩張表已保存每次錯誤內容。
+9. 本次不指定輪詢秒數、租約長度、重試退避與上限；由後續 Worker 設定及測試落實。截止事件未收齊、Unknown／Requested 或無法排序的同時事件依已確認規則待人工確認，不以額外等待秒數推定成功。
+
+
+## 堂票額度占用資料設計（第四階段）
+
+整理日期：2026-10-17。**占用表已部署至開發 GymDB，18 個欄位、1 個主鍵及 3 個唯一防線經查核符合本節定義，沒有 CHECK、外鍵或 rowversion。** 詳細狀態轉換、冪等鍵及開門前後交易見 [額度占用設計](spec/IO_gyms/04-出席確認與額度占用/credit-reservation-design.md)；完整 [建表腳本](spec/IO_gyms/04-出席確認與額度占用/sql/01-create-credit-reservation.sql) 已依先預覽再執行的要求套用。Repository 的 9 個 SQL 整合測試通過，非第四階段全流程或硬體驗收。
+
+### `dbo.sdt_ticket_credit_reservation`：堂票暫占與固定占用
+
+一筆代表一筆出席對某張票券的 1 堂占用；月票不建立。多筆 Released 保留離場／換票歷史，同一出席最多一筆有效 Reserved／Fixed／NeedsReview。換票釋放舊筆並新增，不直接修改 pass_sn。沒有外鍵或 rowversion。
+
+2026-10-17 使用者決策：本占用表的 10 個 CHECK 全部移至程式驗證，保留 PK、idempotency_key 唯一限制及兩個 filtered unique index（有效出席占用／核銷），另保留查詢索引與欄位型別／NOT NULL。此決策只調整本占用表，不移除本文件其他資料表的 CHECK；已依此直接建立新表，沒有對 GymDB 執行 DROP CONSTRAINT。
+
+- 程式由 `CreditReservationData.Validate()` 統一檢查數量、合法狀態、鍵、來源、自指、待確認原階段、固定／釋放／扣堂時間、核銷關聯及原因。`CreditReservation` 建立及每次狀態轉換都呼叫該驗證；Rehydrate 讀取既有資料時亦驗證，拒絕不合法狀態。
+- 新資料尚未分配 reservation_sn，程式無法事先比較新主鍵是否等於 previous_reservation_sn；未來 Repository 取得 INSERT 產生的 ID 後，須在交易提交前以該 ID 重新驗證。已有主鍵的資料在重建／寫入前直接驗證。
+- 未來 Repository 寫入前須驗證完整快照；匯入／批次應呼叫相同驗證。直接 SQL 將不再有這 10 個 CHECK 的防線；狀態字串解析不得對未知值預設成 Reserved。驗證失敗須拋錯並 rollback，不默默修正資料。
+- 2026-10-17 `SqlCreditReservationRepository` 與 `CreditReservationService` 已通過 61 個單元測試及 9 個實際 SQL 整合測試：涵蓋呼叫端交易、來源／關聯及快照驗證、舊快照拒寫、容量／冪等、固定前重驗、最後一堂並行競爭與 rollback。INSERT 取得主鍵後再次驗證，回傳 SQL 實際儲存時間精度。場次時間／資格、歷史還原、開門前後交易及 A／Worker 仍未串接，不能宣稱第四階段已完成。
+
+| 欄位名稱 | SQL Server 型別 | 可為 NULL | 儲存格式與用途 |
+| --- | --- | --- | --- |
+| `reservation_sn` | `bigint IDENTITY(1,1)` | 否 | 占用主鍵 |
+| `attendance_sn` | `int` | 否 | 出席主鍵；先建立或取得同學生同場次出席 |
+| `pass_sn` | `int` | 否 | 被占用票券主鍵 |
+| `reserved_credits` | `int` | 否 | 第一版固定 1 |
+| `reservation_state` | `varchar(20)` | 否 | Reserved／Fixed／Released／Consumed／NeedsReview |
+| `review_from_state` | `varchar(20)` | 是 | NeedsReview 必填 Reserved 或 Fixed，保存原階段 |
+| `idempotency_key` | `varchar(160)` | 否 | 同操作重試沿用的唯一 ASCII 鍵，不得空白 |
+| `gate_request_id` | `uniqueidentifier` | 是 | 建立占用的進場請求 GUID |
+| `processing_item_sn` | `bigint` | 是 | A 建立／移轉占用的工作明細；與 gate_request_id 至少一個有值 |
+| `previous_reservation_sn` | `bigint` | 是 | 前一筆已釋放占用，保留換票／返回歷史鏈 |
+| `usage_sn` | `int` | 是 | Consumed 時的正式核銷主鍵；其他狀態為 NULL |
+| `created_at` | `datetime2(3)` | 否 | 實際建立時間 |
+| `fixed_at` | `datetime2(3)` | 是 | A 實際固定時間，不偽裝為原截止時間 |
+| `released_at` | `datetime2(3)` | 是 | 實際釋放時間，僅 Released 有值 |
+| `consumed_at` | `datetime2(3)` | 是 | 實際結算時間，僅 Consumed 有值 |
+| `updated_at` | `datetime2(3)` | 否 | 實際最後異動時間 |
+| `reason_code` | `varchar(60)` | 是 | Released／NeedsReview 必填原因代碼 |
+| `reason_message` | `nvarchar(1000)` | 是 | Released／NeedsReview 必填說明 |
+
+- 時間全部由後端 IClock 明確寫入台灣本地時間，格式例如 `2026-10-17 19:10:00.125`，不設資料庫預設時間。
+- 可新增額度＝票券 credits_remaining 減去 Reserved／Fixed／NeedsReview 的占用總額；Consumed 已正式扣堂，不再次減掉。
+- Released／Consumed 不復活；離場後返回使用新請求建立新占用，同次重送只回傳原結果。Fixed 同堂回場不另占。
+- NeedsReview 保留原 Reserved／Fixed 階段及額度，人工重驗後才能恢復，不從 Unknown 推定成功。
+- 進場前先短交易建立占用及 Requested，提交後才呼叫硬體；明確未開門釋放本次新占用，成功後落庫失敗保留待確認，不重送硬體命令。
+- B 扣堂、核銷、占用轉 Consumed、必要生命週期／profile 及工作完成標記一起提交。唯一索引不能代替交易、核銷冪等及歷史資格驗證。
+- 本節只新增占用表；既有 sdt_att_record ALTER、兩張工作表建置及第五階段核銷防重須另行整合，不宣稱本 CREATE 可完成全部流程。
+
+### CREATE TABLE／索引語法：額度占用
+
+以下為完整 SQL 草稿中的表與索引定義；執行前仍需核對目標 schema。完整腳本會拒絕非 GymDB 或已有同名物件的情況，所有建表／索引在同一交易，失敗 rollback；不刪除或覆寫既有資料。
+
+```sql
+CREATE TABLE dbo.sdt_ticket_credit_reservation
+(
+    reservation_sn BIGINT IDENTITY(1,1) NOT NULL,
+    attendance_sn INT NOT NULL,
+    pass_sn INT NOT NULL,
+    reserved_credits INT NOT NULL,
+    reservation_state VARCHAR(20) NOT NULL,
+    review_from_state VARCHAR(20) NULL,
+    idempotency_key VARCHAR(160) NOT NULL,
+    gate_request_id UNIQUEIDENTIFIER NULL,
+    processing_item_sn BIGINT NULL,
+    previous_reservation_sn BIGINT NULL,
+    usage_sn INT NULL,
+    created_at DATETIME2(3) NOT NULL,
+    fixed_at DATETIME2(3) NULL,
+    released_at DATETIME2(3) NULL,
+    consumed_at DATETIME2(3) NULL,
+    updated_at DATETIME2(3) NOT NULL,
+    reason_code VARCHAR(60) NULL,
+    reason_message NVARCHAR(1000) NULL,
+
+    CONSTRAINT PK_sdt_ticket_credit_reservation PRIMARY KEY (reservation_sn),
+    CONSTRAINT UQ_sdt_ticket_credit_reservation_key UNIQUE (idempotency_key)
+);
+
+-- One effective credit hold per attendance, including holds awaiting review.
+CREATE UNIQUE INDEX UX_sdt_credit_reservation_live_attendance
+    ON dbo.sdt_ticket_credit_reservation (attendance_sn)
+    WHERE reservation_state IN ('Reserved', 'Fixed', 'NeedsReview');
+
+CREATE INDEX IX_sdt_credit_reservation_pass_state
+    ON dbo.sdt_ticket_credit_reservation (pass_sn, reservation_state)
+    INCLUDE (attendance_sn, reserved_credits);
+
+CREATE INDEX IX_sdt_credit_reservation_attendance_history
+    ON dbo.sdt_ticket_credit_reservation (attendance_sn, reservation_sn);
+
+CREATE UNIQUE INDEX UX_sdt_credit_reservation_usage
+    ON dbo.sdt_ticket_credit_reservation (usage_sn)
+    WHERE usage_sn IS NOT NULL;
+```
