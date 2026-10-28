@@ -1,8 +1,10 @@
 # 第四階段實作狀態
 
-更新日期：2026-10-17。**部分實作，尚未啟用學生課程進場，非第四階段完成／驗收。** 測試清理的 string[]／JSON handler 衝突已改用純量參數處理；既有 JSON 設定未變更。已備份及清除核准的測試殘留，最新 31 個 SQL 測試全部通過，測後四張出席／工作／占用表均為 0；完整待辦見下節。
+更新日期：2026-10-23。**部分實作，尚未啟用學生課程進場，非第四階段完成／驗收。** 已拆分進場身分識別與基本驗票，實際 Gate 在課程／前置結算檢查前不再整理票券。指定範圍 153 個單元測試通過；使用者停止後端解除 DLL 鎖定後，34 個 SQL 測試亦通過，測後出席／工作／明細／占用四表均為 0。既有 JSON、schema 及功能啟用設定未變更，剩餘跨階段／驗證事項見下節。
 
 ## 已完成的程式
+
+2026-10-25 跨階段進度：第五階段已接入 B 核心及 A／B 工作順序，兩個核銷時間欄位已轉為 datetime2(3)，工作／核銷參數精度已修正，48 個 SQL 案例通過，含先上一堂 B 再下一堂 A 的留館接續。以下既有測試與待辦保留為歷史範圍；最新第五階段狀態見 [第五階段實作狀態](../../05-課程結算與背景工作/current/implementation-status.md)。不因本輪測試通過宣告第四階段所有現場驗收完成，ClassProcessing 仍未啟用。
 
 - Domain `CreditReservation`／`CreditReservationData`：集中檢查原 10 個 CHECK；建立、狀態轉換與讀取重建均驗證。NeedsReview 保留原階段與容量，普通出場不能釋放 Fixed。
 - `ICreditReservationRepository`／`SqlCreditReservationRepository`：要求呼叫端交易、鎖定讀取、完整原快照比對、合法轉態、來源與學生／票券／出席關聯檢查。INSERT 取得 ID 後檢查自指；不接受未知 enum 或無效持久化資料。
@@ -12,6 +14,7 @@
 - 後續已開始出席 Repository、ClassAdmissionService、A 確認服務、Coordinator／Worker 與 GatePassageService 串接；目前為編寫中版本，未完成全流程驗證。新進場流程受 ClassProcessing.Enabled 保護，預設 false，不可將已寫入程式當成已驗收。
 - device_record 額外關聯欄位腳本 03 已於預覽後在交易內套用及驗證，五欄均可 NULL，舊事件無改寫／回填；正式功能仍預設停用。
 - 占用／出席服務不自行 begin／commit／rollback，由 Gate／A 呼叫端統一控制交易，以確保出席、Requested、占用及工作狀態一起提交。已有實際 SQL rollback、並行占用與 lease 接手案例，但不等於完成跨程序故障及實際硬體驗收。
+- 2026-10-23 新增 `IdentifyEntryAsync`：只讀取電話、啟用角色與 profile，不啟用票券、不開交易。具有課程進場服務的 Gate 改呼叫此方法，票券整理留到 ClassAdmissionService 的課程時段／前置結算檢查後；`CheckEntryAsync` 保留既有基本驗票用途，不作為此 Gate 路徑的前置啟用步驟。單元及所新增 SQL 順序回歸案例已通過；不等於完整硬體端到端驗收。
 
 ## SQL 預覽與資料庫狀態
 
@@ -44,12 +47,17 @@
 ## 尚待完成
 
 - 資料庫與占用 Repository 的基礎 SQL／交易／並行驗證已完成；仍需進出場、A、跨程序背景工作全流程測試。
-- 測試清理、測試資料型別問題及核准的兩批殘留已處理；最新 31 個 SQL 測試通過。前輪指定範圍 111 個單元測試通過，本輪僅修改 SQL 測試 Fixture／新增清理回歸案例，未重跑應用層單元測試。仍非第四階段完整驗收。
+- 測試清理、測試資料型別問題及核准的兩批殘留已處理；本輪指定範圍 153 個單元測試、34 個 SQL 測試通過，包含進場身分拆分與前置結算優先的回歸案例。仍非第四階段完整驗收，不重複列為待實作。
 - 完成出席／進出場、Pending、月票零占用、失敗／Unknown、截止時序的整合驗證；關聯欄位已套用，ClassProcessing 預設不啟用。
 - A／Coordinator／Worker 已有原截止歷史、租約恢復、個別學生錯誤隔離及重跑案例通過；票券變更完整組合、真正跨程序故障／重試及全流程仍待補驗，不能標示整階段完成。
-- 跨日期補跑目前採缺乏票券歷史就 NeedsReview 的保守分支，未完成一般歷史票券選擇及接續功能。
-- 第五階段 B 正式扣堂、核銷防重及接續票券；不以假的 B 完成旗標解除下一堂依賴。
+- 2026-10-23 最新決策：跨日未完成的 A／B 一律 NeedsReview，包括 A 已固定而 B 未完成者；完整歷史還原及三張歷史表暫緩。A 目前已有跨日保守分支；B 跨日防線尚待階段 05 實作，不因文件確認而標成已完成。
+- 第五階段 B 正式扣堂與核銷防重仍待實作；B 只結算，不啟用下一張票。進場及下一堂 A 的前置未完成不提前啟用、A 可呼叫共用服務整理排隊票已補 SQL 驗證；B 真正提交後到下一堂的完整銜接仍依賴階段 05，不另建接續工作表，也不以假的 B 完成旗標解除依賴。
 - 第六階段人工更正／待確認入口及相關硬體、操作驗收。
+- 2026-10-25 第五階段文件已確認 B 嚴格 > 下課＋10 分鐘、最多嘗試 3 次／至少隔 15 秒，以及處理中回覆後停止轉圈、清空電話、不輪詢／不自動重送。核銷擴充改採 attendance_sn 的程式端交易鎖定防重，不新增扣堂唯一約束，新增 recorded_at 提案使用 datetime。以上均為階段 05／06 待實作設計，沒有修改本階段程式、既有 datetime2、JSON、schema 或啟用設定，也沒有新增測試結果。
+
+## 已確認：第一版補跑範圍與代價
+
+第一版範圍最新確認（2026-10-23）：詳見 [本階段規格：縮小範圍與代價](../impelment_rule.md#第一版已確認縮小歷史補跑範圍與代價)。B 只結算，接續由下一次進場／下一堂 A 觸發；接受下一張票不立即啟用、接續異常留在後續流程，以及跨日未完成 A／B 均由人工處理的成本。學生詳細頁查閱、確認與恢復入口仍為第一版依賴，尚未實作。當日 A 衝突／證據檢查及全部待驗證紀錄保留；本輪只有文件對齊，沒有新增測試結果或修改程式／DB。
 
 ## 已確認：課間預參加後的排課異動
 
@@ -103,3 +111,20 @@
 - 首次重跑 30／30 通過，exit code 0、13.19 秒，編譯 error／warning 均 0；日誌：`C:\Users\HarryLin\AppData\Local\Temp\gym-credit-reservation-ahtbjubi\test.log`。
 - 加入上述回歸案例後，最新 **31／31 SQL 測試通過，無跳過**，exit code 0、12.66 秒，編譯 error／warning 均 0。指令：`dotnet test tests/gym-system.Api.Tests/gym-system.Api.Tests.csproj --no-restore --filter FullyQualifiedName~CreditReservationSqlTests --logger console;verbosity=normal`；工作目錄為 backend 根目錄，經 Python 收集日誌及摘要。完整日誌：`C:\Users\HarryLin\AppData\Local\Temp\gym-credit-reservation-_5_f1o7w\test.log`。
 - 測後新連線唯讀驗證六張表的快照 ID 均無殘留，出席／工作／工作明細／占用四表全表均為 0。沒有呼叫硬體，沒有修改商業規則、JSON 設定或額外資料庫 schema；本輪不另執行重複 build，SQL 測試已編譯 API 及其相依專案。
+
+## 2026-10-23 進場順序修正及 DLL 鎖定（已解除）
+
+- 已確認舊順序：Gate 呼叫 CheckEntryAsync 時先以獨立交易整理票券，之後 ClassAdmissionService 才檢查上一堂 B，可能造成前置未完成卻已啟用下一張票。現改由 Gate 先做只讀身分檢查，票券整理仍由既有課程進場交易處理；不複製生命週期或新增歷史表。
+- 新增 5 個身分識別測試，並擴充 Gate 單元測試確認課程準備拒絕及成功／重送路徑不呼叫提前整理票券的基本驗票方法。連同原有相關案例共 **153／153 通過**，exit code 0、16.23 秒，辨識到編譯 error／warning 均 0。工作目錄 backend 根目錄，經既有 Python helper 收集完整日誌；日誌：`C:\Users\HarryLin\AppData\Local\Temp\gym-credit-reservation-6y_hbcn6\test.log`。
+- 已加入三個待執行 SQL 案例：真實 Gate／身分／課程服務組合遇上一堂未結算時不提前啟用排隊票；下一堂 A 前置未完成時不整理票券；下一堂 A 可根據既有進場歷史呼叫共用服務啟用排隊票，不需要確認時再送新開門請求。沒有實作 B，測試僅建立自有前置狀態；控制器為拒絕任何實際呼叫的測試替身。
+- SQL 驗證指令：`dotnet test tests/gym-system.Api.Tests/gym-system.Api.Tests.csproj --no-restore --filter FullyQualifiedName~CreditReservationSqlTests --logger console;verbosity=normal`，同樣由 Python 包裝。**在建置階段失敗，SQL 測試未啟動**；exit code 1、22.03 秒。辨識到 6 筆去重後 MSBuild error、30 筆含重試序號的 warning，均指向輸出檔案鎖定，不能當成 C# 邏輯編譯錯誤或 SQL 案例失敗。
+- 原因：正在運行的 `gym-system.Api`（PID 73332）鎖住 API Debug 輸出目錄中的 Domain／Application／Infrastructure DLL，MSBuild 複製重試十次後回報 MSB3027／MSB3021；warning 為 MSB3026。完整日誌：`C:\Users\HarryLin\AppData\Local\Temp\gym-credit-reservation-26d5yaxv\test.log`。
+- 已依協作規則暫停，未自行停止使用者後端、變更建置參數繞過或重跑。本次 SQL 案例尚未執行，沒有因此建立測試資料、修改 schema 或呼叫硬體；功能與 ClassProcessing 設定未啟用，JSON 設定未改。待使用者停止後端或確認後續驗證方式，再繼續。
+
+### 使用者停止後端後的驗證結果
+
+- 使用者回覆「暫停了」後，唯讀確認原鎖檔 API 程序 PID 73332 已不存在；未自行終止其他程序，也未自行重啟後端。
+- 沿用上述 SQL 測試指令、工作目錄及 Python 日誌包裝重跑，**34／34 通過，無跳過**，exit code 0、15.28 秒，辨識到編譯 error／warning 均 0。完整日誌：`C:\Users\HarryLin\AppData\Local\Temp\gym-credit-reservation-d3f865k5\test.log`。這次包含正常編譯 API 與相依專案，不另外執行無新疑點的重複 build。
+- 新增三案例均通過：真實 Gate 編排使用只讀身分檢查，前置 B 未完成時回 Denied／PREVIOUS_SETTLEMENT_PENDING 且排隊票保持 UnActive；下一堂 A 回 Blocked 且不提前啟用；無前置阻擋時 A 可使用既有成功進場事件整理並固定排隊票，不需確認時再送進場請求。測試未建立真實裝置授權、不呼叫硬體，也沒有假裝實作 B 正式結算。
+- 測後另用新連線唯讀核對 GymDB：出席、工作、工作明細、占用四表全表均 0；測試 Fixture 亦檢查其自有會員、票券、場次及進出事件的清理。沒有修改既有業務資料、資料庫 schema、JSON 或 ClassProcessing 啟用設定。
+- 最近應用層單元測試仍為本輪修正後的 153／153 通過（上一節日誌）；本次只接續先前被鎖住的 SQL 驗證，未宣稱重新跑過全部應用／API 測試。B 扣堂、跨日 B 防線、人工處理入口與完整硬體驗收仍未完成，第四階段不得因此標為已上線。

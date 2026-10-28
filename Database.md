@@ -338,28 +338,65 @@
     
 - 票券核銷表 **`sdt_ticket_usage_log`**
     - 學生票券的使用紀錄，Insert only
-    - `usage_sn` , `pass_sn` 做為複合主鍵
+    - 維持實際 `usage_sn` 單一主鍵；票券關聯沿用 `pass_id`，不新增 `pass_sn` 複合主鍵。
     - 2026-10-16 唯讀查核 GymDB：實際欄位為 `usage_sn int`（PK）、`pass_id nvarchar(50)`、`usage_dt datetime`、`usage_type nvarchar(50)`、`deducted_credits int`、`rem_credits_snapshot int`、`operator_id nvarchar(50)`、`remark nvarchar(max)`；尚未查到 `attendance_sn`、`idempotency_key`、`usage_action` 或對應 Consume／Reverse 欄位。下表中未出現在此清單的欄位是設計／目標描述，不代表 GymDB 已部署。
     
     | **欄位名稱** | **資料類型** | **說明** | **範例** |
     | --- | --- | --- | --- |
     | `usage_sn` | Primary Key | 核銷紀錄流水號 | 1, 2, 3... |
-    | `pass_sn` | int not null | 關聯到 `sdt_ticket_pass` |  |
-    | `attendance_sn` | int nullable | 關連到 `sdt_att_record` |  |
-    | `idempotency_key` | varchar(100) not null | 相同裝置事件或相同請求重送時，避免扣除兩次。 |  |
-    | `usage_action` | VARCHAR(20) NOT NULL | 區分一般核銷 `Consume` 與沖銷 `Reverse` |  |
-    | `usage_type` | Enum | 核銷方式：
-     • `Manual` (櫃檯手動)
-     • `Gate_Entry` (閘門進場)
-     • **`Auto_Consecutive`** (未離場，自動核銷) | Gate |
-    | `usage_dt` | DateTime | 核銷/進場時間 | 2026-03-13 19:30:00 |
-    | `deducted_credits` | Int not null | 這次扣了多少堂（月票則存 0） | 1 |
-    | `credits_before_snapshot` | int nullable | 堂數快照，註銷前餘額
-    (月票為null) |  |
-    | `credits_after_snapshot` | Int | 堂數快照，註銷後餘額(月票為null) | 9 |
-    | `reversed_usage_sn` | int | 沖銷時指向原始核銷紀錄；依目前「只保留主鍵、不建立外鍵」原則，不設外鍵約束。 |  |
-    | `operator_id` | VarChar | 操作者 ID（閘門進場可存 System） | admin_01 |
-    | `remark` | Text | 備註 | 逾時未進場補發、或手動扣點說明 |
+    | `pass_id` | nvarchar(50) nullable（既有） | 沿用現有票券 ID 關聯；新課程核銷由程式要求有值及歸屬一致 | P1 |
+    | `attendance_sn` | int NULL（2026-10-25 已新增） | 指向確切出席；新課程 Consume 必填，鎖定後查本堂 Consume 作業務防重 | 123 |
+    | `usage_action` | varchar(20) NULL（2026-10-25 已新增） | Consume／Reverse；新課程核銷必填，舊資料無依據不推測回填 | Consume |
+    | `usage_type` | nvarchar(50) nullable（既有） | 新課程核銷來源 Manual／Auto_Settlement；僅記來源，不作唯一防重條件。舊來源值不批次改寫 | Manual |
+    | `usage_dt` | datetime2(3) NULL（2026-10-25 已轉型） | 業務時間設計：本堂結束時間；不是新進場事件時間 | 2026-03-13 20:00:00.000 |
+    | `deducted_credits` | int nullable（既有） | 新課程 Consume 由程式要求為 1；月票不建立核銷，Reverse 的增退量表示留階段 06 細化 | 1 |
+    | `credits_before_snapshot` | int NULL（2026-10-25 已新增） | 扣堂前餘額；新課程 Consume 必填，與扣後餘額核對 | 5 |
+    | `rem_credits_snapshot` | int nullable（既有） | 沿用扣堂後餘額，不另外新增 credits_after_snapshot | 4 |
+    | `recorded_at` | datetime2(3) NULL（2026-10-25 已轉型） | 真正處理時的台灣本地時間；新課程 Consume 必填，與 usage_dt 分開 | 2026-03-13 20:10:05.125 |
+    | `reversed_usage_sn` | int NULL（2026-10-25 已新增、預留） | 第六階段 Reverse 指向原 Consume，不設外鍵；第五階段先不實作沖銷 | 456 |
+    | `operator_id` | nvarchar(50) nullable（既有） | 操作者 ID（系統自動結算可記系統來源） | admin_01 |
+    | `remark` | nvarchar(max) nullable（既有） | 備註 | 手動扣點說明 |
+
+    - Create Table（完整結構：13 欄及兩個時間欄位 datetime2(3) 已部署）
+
+        以下供新建資料庫參考；GymDB 已有此表及核銷資料，5 欄擴充及 usage_dt／recorded_at 的 ALTER COLUMN 轉型均已部署，保留資料、沒有重建。除這兩欄型別外，其餘欄位維持既有定義與 NULL 設定。主鍵採明確名稱；現有 GymDB 的系統產生主鍵名稱不因此變更。
+
+        ```sql
+        CREATE TABLE dbo.sdt_ticket_usage_log
+        (
+            usage_sn INT IDENTITY(1,1) NOT NULL,
+            pass_id NVARCHAR(50) NULL,
+            usage_dt DATETIME2(3) NULL,
+            usage_type NVARCHAR(50) NULL,
+            deducted_credits INT NULL,
+            rem_credits_snapshot INT NULL,
+            operator_id NVARCHAR(50) NULL,
+            remark NVARCHAR(MAX) NULL,
+
+            -- 第五階段：關聯出席、核銷類型及扣堂前餘額
+            attendance_sn INT NULL,
+            usage_action VARCHAR(20) NULL,
+            credits_before_snapshot INT NULL,
+            -- 台灣本地實際處理時間，與 usage_dt 業務時間分開
+            recorded_at DATETIME2(3) NULL,
+            -- 預留第六階段沖銷指向原核銷
+            reversed_usage_sn INT NULL,
+
+            CONSTRAINT PK_sdt_ticket_usage_log PRIMARY KEY (usage_sn)
+        );
+        ```
+
+        不新增 FK、CHECK、扣堂唯一約束／索引或 rowversion；新課程核銷必要值及防重由共用程式、鎖定與交易處理。
+
+    **2026-10-25 第五階段欄位部署完成：** 經使用者確認後執行 [ALTER SQL](spec/IO_gyms/05-課程結算與背景工作/sql/02-extend-ticket-usage-log.sql)，保留原 8 欄並新增 attendance_sn、usage_action、credits_before_snapshot、recorded_at 四個核心欄位，另預留 reversed_usage_sn，共 13 欄。提交前驗證新增欄位型別／允許 NULL／無預設值、原欄位定義及索引／約束不變，原 1 筆核銷資料各欄位值不變；提交後再次確認 13 欄與 1 筆資料。新欄位均為 NULL，不回填。新增時間欄位採 datetime；既有進出事件／占用／工作表 datetime2 不轉型。B 結算程式仍待實作，新課程必要值檢查及防重是程式目標，不因 schema 部署視為完成。
+
+    不新增核銷 idempotency_key，也不新增「同堂扣一次」的 UNIQUE constraint／unique index、FK、CHECK 或 rowversion。人工與 B 共用服務，依既定順序在同一交易取得相關鎖，再查 attendance_sn ＋ Consume、核對票券／占用／核銷一致性；扣堂、寫核銷、Consumed 關聯及工作完成一併提交或回滾。接受直接 SQL 或未遵守鎖定流程者可繞過防重的限制；既有主鍵、占用表冪等鍵與索引不移除。
+
+    **2026-10-25 後續決策及部署：時間精度對齊完成。** 經使用者確認後執行 [時間精度 ALTER](spec/IO_gyms/05-課程結算與背景工作/sql/03-align-usage-time-precision.sql)，將同一張 sdt_ticket_usage_log 的 usage_dt、recorded_at 兩欄改為 datetime2(3)，保留小數點第三位，允許 NULL 及台灣本地時間原則不變。提交前後驗證兩欄型別／scale=3／允許 NULL，原 1 筆資料在毫秒精度下核對一致，其餘欄位、索引與約束不變；沒有重建、刪除或回填。此決策取代上方先前部署時採 datetime 的目標，歷史部署記錄仍保留。C# 維持 DateTime；背景工作及核銷 repository 已局部明確傳 DbType.DateTime2，不修改全域 Dapper 或 JSON 設定。舊資料已遺失的精度不推測補回。
+
+    **後續提醒：** 其他相關資料表的時間型別本輪不批次修改；未來處理票券、付款、會員或課表等資料表時，先提示時間精度尚待對齊，再確認欄位範圍、相依項目與資料保留方式後修改。詳見 [時間型別對齊待辦](spec/IO_gyms/issue/gym-io-issues.md#io-17-相關資料表時間精度對齊待處理時先提醒)。
+
+    原 Consume 不刪除；Reverse 沿用原出席／票券並指向原核銷，防重同樣由共用交易與程式檢查。反覆沖銷後補認依第一版規則轉人工，不藉新 request_id 重扣。詳見 [階段 05 規劃](spec/IO_gyms/05-課程結算與背景工作/impelment_rule.md)。
 - 訂單表 **`orders`**
     - Create Table
         
