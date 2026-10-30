@@ -25,8 +25,10 @@
 | `reservation_state` | `varchar(20)` | 否 | Reserved／Fixed／Released／Consumed／NeedsReview |
 | `review_from_state` | `varchar(20)` | 是 | NeedsReview 時必填 Reserved 或 Fixed，保存待確認前的階段；離開待確認狀態時清空 |
 | `idempotency_key` | `varchar(160)` | 否 | 穩定 ASCII 操作鍵，不得空白；相同操作重試沿用，換機／網路重試不能任意換鍵 |
-| `gate_request_id` | `uniqueidentifier` | 是 | 最初建立占用的進場請求 request_id；不因後續回場覆寫來源 |
-| `processing_item_sn` | `bigint` | 是 | A 建立或移轉占用時的來源工作明細；兩個來源欄位至少一個有值 |
+| `gate_request_id` | `uniqueidentifier` | — | 2026-10-30 前歷史欄位，已移除 |
+| `processing_item_sn` | `bigint` | — | 2026-10-30 前歷史欄位，已移除 |
+| `source_type` | `varchar(24)` | 否 | 已部署：`GateRequest`、`ClassWorkItem` 或 `ManualPresence` |
+| `source_key` | `varchar(64)` | 否 | 已部署：對應來源 GUID 標準格式或正整數流水號字串 |
 | `previous_reservation_sn` | `bigint` | 是 | 換票或重新占用所接續的已釋放占用；保留歷史鏈，不作可用額度依據 |
 | `usage_sn` | `int` | 是 | Consumed 時關聯正式核銷 usage_sn；其餘狀態必為 NULL |
 | `created_at` | `datetime2(3)` | 否 | 本次占用真正建立時間 |
@@ -36,6 +38,8 @@
 | `updated_at` | `datetime2(3)` | 否 | 最近實際異動時間 |
 | `reason_code` | `varchar(60)` | 是 | Released／NeedsReview 必填原因代碼 |
 | `reason_message` | `nvarchar(1000)` | 是 | Released／NeedsReview 必填原因；不放憑證、電話、完整 exception |
+
+2026-10-30 已將來源改為 `source_type`＋`source_key`，詳細欄位與遷移查核見 [Database.md](../../../Database.md)。程式按種類解析並核對來源的學生與出席；`idempotency_key` 仍只用來防止同操作重複建立。GymDB 已移除舊欄位，舊版 API 不可再連接此資料庫；新版程式的 SQL 整合測試 50／50 通過，實際 API 啟動與現場驗收未執行。
 
 所有時間由後端 IClock 寫入台灣本地時間，例如 `2026-10-17 19:10:00.125`，不使用 GETDATE／SYSDATETIME 預設值推測時區。pass_sn、attendance_sn、usage_sn 及 processing_item_sn 型別依目前查核資料設計，部署前仍須唯讀重驗；沒有外鍵不代表可以不驗證關聯。
 
@@ -52,7 +56,7 @@
 | quantity | ReservedCredits 必須為 1 |
 | state | State 必須是已定義 enum，不允許任意數字或未知字串預設放行 |
 | key | 冪等鍵必填、ASCII、最長 160 |
-| source | 至少一個有效 GateRequestId／ProcessingItemSn |
+| source | 目前至少一個有效 GateRequestId／ProcessingItemSn；切換後為已知 SourceType 與相符的 SourceKey |
 | previous | PreviousReservationSn 為正數且不等於已分配的 ReservationSn |
 | review | NeedsReview 的原階段限 Reserved／Fixed；其他狀態原階段為 NULL |
 | fixed | Fixed／Consumed 或原 Fixed 的待確認須有 FixedAt；Reserved／原 Reserved 的待確認不能有 FixedAt |

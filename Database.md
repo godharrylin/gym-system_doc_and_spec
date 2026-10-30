@@ -283,8 +283,11 @@
         -- Attendance fact state; eligibility and credit reservation are separate dimensions.
         sdt_att_record_status NVARCHAR(20) NOT NULL,
         sdt_att_record_ticket_eligibility_state VARCHAR(20) NULL,
-        -- Summary timestamps only. device_record remains the source for reconstructing presence.
+        -- Summary timestamps only. Reconstruct presence from device_record and approved manual corrections.
         sdt_att_record_chk_in_time DATETIME2(3) NULL,
+        -- Proposed: immutable evidence selected by A; not the last-update source.
+        sdt_att_record_check_in_evidence_source VARCHAR(10) NULL,
+        sdt_att_record_check_in_evidence_sn BIGINT NULL,
         sdt_att_record_chk_out_time DATETIME2(3) NULL,
         sdt_att_record_remark NVARCHAR(MAX) NULL,
         sdt_att_record_upd_source NVARCHAR(50) NULL,
@@ -321,20 +324,25 @@
     | **`sdt_att_record_status`** | `nvarchar(20) NOT NULL` | 出席狀態
     • `Pending`: 緩衝期內，出席尚未確認。中途離場則保留已確認出席、另查進出紀錄
     • `CheckIn`(已簽到)：在「開課＋十分鐘」截止時仍在館內，確認該堂出席事實；合法票券資格另外看 eligibility_state，不以 CheckIn 單獨授權或扣堂。
-    • `CheckOut`(已簽退)，課程結束後，有簽退會是這個狀態。 |
+    • `CheckOut`(已簽退)：該堂追蹤期限內成功離場，且期限內未再成功回場；已成立的出席與結算資格不因此撤銷。`CheckIn`／`CheckOut` 是該堂紀錄狀態，不代表學生目前在館內或館外。 |
     | **`sdt_att_record_ticket_eligibility_state`** | `varchar(20) NULL` | **該學生在「該課程出席確認時」的票券資格狀態。欄位於 2026-10-17 已部署，A 資格確認程式尚未串接。**
       •  `Eligible` : 有符合規則的票券；堂票已成功占用額度
       • `Ineligible`: 沒有可用票券，或沒有足夠可占用額度 |
-    | **`sdt_att_record_chk_in_time`** | `datetime2(3) NULL` | 簽到摘要時間；還原進出仍以 `device_record` 為準。 |
-    | **`sdt_att_record_chk_out_time`** | `datetime2(3) NULL` | 簽退摘要時間；還原進出仍以 `device_record` 為準。 |
+    | **`sdt_att_record_chk_in_time`** | `datetime2(3) NULL` | A 確認出席時，取開課後十分鐘截止時仍有效的在館區間所對應的成功進場時間；課前已入館且未離場，可早於開課。不可只沿用最初入場請求寫入的時間。 |
+    | **`sdt_att_record_check_in_evidence_source`** | `varchar(10) NULL`（2026-10-30 已部署） | A 採認的簽到證據種類：`Device` 或 `Manual`；與下欄一起保存，不隨後續 `upd_source` 更新而覆寫。 |
+    | **`sdt_att_record_check_in_evidence_sn`** | `bigint NULL`（2026-10-30 已部署） | 依來源指向 `device_record_sn` 或 `sdt_presence_correction_log.correction_sn`；A 與簽到時間同一交易寫入。 |
+    | **`sdt_att_record_chk_out_time`** | `datetime2(3) NULL` | 該堂出席後、下課十分鐘追蹤期限內最後一次有效成功離場時間；期限內回場時清空，期限內再次離場才重填。期限到達時仍在館內則維持 NULL；還原完整進出仍查原始紀錄。 |
     | **`sdt_att_record_remark`** | `nvarchar(max)`（目前允許 NULL） | 備註 |
     | **`sdt_att_record_upd_source`** | `nvarchar(50)`（目前允許 NULL） | 異動來源
     • `Costumer_Click` (客人點擊)
     • `System_ForgotCheckout` (系統更新)
     • `Staff_Manual` (員工手動補登) |
+
     | **`sdt_att_record_upd_by_staff`** | `nvarchar(50)`（目前允許 NULL） | 如果是員工補登，此欄位會顯示員工的id |
     | **`sdt_att_record_create_dt`** | `datetime2(3) NOT NULL` | 實際建立時間，台灣本地時間；2026-10-17 新增於空表，沒有回填歷史。 |
     | **`sdt_att_record_upd_date`** | `datetime2(3) NOT NULL` | 資料異動時間，台灣本地時間。 |
+
+    **2026-10-29 出席時間與畫面規則（目標，尚未全數實作）：** A 以「開課＋十分鐘」截止時的館內狀態判定；截止前離場且未回館不成立出席，截止後離場保留出席。該堂進出追蹤至下課後十分鐘整點（含）；期限內離場後於期限外回館，原出席維持 `CheckOut` 與原離場時間。期限外進出不更新該堂出席狀態或簽退時間。一般成功離場／回場應沿用同一 `sdt_att_record_sn`；每位學生每個實際場次仍只有一筆出席主紀錄。人工補登於期限內可同步更新該堂 `CheckOut` 與目前館內狀態；期限外只更正目前館內狀態並留下稽核，不回寫該堂。人工更正不新增或改寫成功的 `device_record`。學生詳細頁以此表顯示出席流水號、場次時間、課程、狀態及固定票券，結算進度另查 A／B 工作與核銷，不以 `CheckIn`／`CheckOut` 推定已結算。詳見[階段 06 規則](spec/IO_gyms/06-人工操作與異常處理/impelment_rule.md)。
     
 - 票券核銷表 **`sdt_ticket_usage_log`**
     - 學生票券的使用紀錄，Insert only
@@ -1382,13 +1390,15 @@
     | **`is_simulated`** | Bit | 是否由 Turnstile Mock 產生；Mock 成功不等於實際進出 | 0 |
     | **`attendance_sn`** | Int NULL | 第四階段：此次開門準備對應的出席主鍵；邏輯關聯，不設外鍵 | 123 |
     | **`reservation_sn`** | BigInt NULL | 此次使用的占用；月票無占用時為 NULL；是否由本次建立另看下方旗標 | 456 |
-    | **`admission_kind`** | VarChar(20) NULL | `RegularEntry`／`PreEntry`／`Return`；不是自由文字授權原因 | RegularEntry |
+    | **`admission_kind`** | VarChar(20) NULL | 進場為 `RegularEntry`／`PreEntry`／`Return`；課程關聯的成功離場使用 `Exit`，且 created_pending／created_reservation 均為 0；不是自由文字授權原因。`Exit` 為 2026-10-29 目標規則，程式與資料尚待驗證 | RegularEntry |
     | **`created_pending`** | Bit NULL | 本次是否新建／恢復 Pending；失敗時不得取消先前有效參加 | 1 |
     | **`created_reservation`** | Bit NULL | 本次是否新建占用；失敗只處理自己的新占用，不能釋放他次請求占用 | 1 |
 
     實際變更腳本：[第二階段 device_record 擴充](spec/IO_gyms/02-開門控制與進出紀錄/sql/02-extend-device-record.sql)。館內狀態第一版由每位使用者最後一筆 `affects_presence = 1` 的成功進／出事件推導；`sdt_profile_cur_visit_at` 仍只是學生最近成功進場時間，不單獨代表目前在館內。
 
     2026-10-17 已在開發／測試 GymDB 套用[第四階段開門關聯欄位](spec/IO_gyms/04-出席確認與額度占用/sql/03-link-gate-request-attendance.sql)：以上 5 欄均可 NULL，無新外鍵、CHECK、rowversion 或預設值，既有進出紀錄不回填、不改寫。舊紀錄全 NULL 表示沒有此階段準備上下文；已填 attendance_sn 卻缺少種類／旗標時視為資料不完整，不把 NULL 猜成 false。
+
+    **2026-10-29 課堂進出關聯目標（尚未全數實作）：** 進出事件以後端收到設備開門成功回應的 `responded_at` 作業務時間，不使用平板送出或請求建立時間；成功開門是系統採認的進出操作，不宣稱設備證明人員實際通過。只有成功且 `affects_presence = 1` 的非模擬事件可用於出席與館內狀態推導。A 採用截止時仍有效的進場事件；下課後十分鐘整點前的該堂離場／合法回場關聯同一 `attendance_sn`，事件逐筆保留。期限後回館不再更新該堂出席；若請求在期限內已準備並綁定 `attendance_sn`，原請求關聯仍保留供稽核，不能視為有效同堂回場。人工館內更正另存稽核，不偽造門禁成功事件。
 
 ## 進出站點與瀏覽器授權（第二階段資料設計）
 
@@ -1528,7 +1538,7 @@ GO
 ### 已確認的規則與資料分工
 
 - 沿用 `sdt_att_record` 保存目前出席結果、`sdt_ticket_usage_log` 保存扣堂／沖銷；另新增 `sdt_att_correction` 保存更正案件，及 `sdt_att_record_audit_log` 保存不可覆寫的出席變動歷史。
-- 第一版由 Admin 自行確認並執行，不另設第二位人員審核；`Pending` 是尚未處理，不是等待另一位主管簽核。理由、依據、操作者及結果仍須保存，後端須驗證權限。
+- 以下撤銷／補認案件與「Admin 確認並執行」是較早的設計草案，未部署、未授權納入目前學生詳細頁的出席編輯；目前 Admin 僅能查閱 `Pending`／`NeedsReview`，日常出席操作限補登離場及依成功事件確認回場。`NeedsReview` 的 SQL 資料查證與修復由開發維運者處理，不提供 Admin 通用恢復入口。若日後重新啟用撤銷／補認案件，仍須另行確認權限及下列防重規則。
 - 允許撤銷誤判出席，以及補認原本符合歷史資格、但被漏記的出席；不作遲到通融，不拿事後買票補原本沒有的資格，原本正確的 Ineligible 仍不補結算。
 - 沖銷只允許整筆退回原 Consume 的堂數，不提供任意輸入加減堂數，也不刪除或改寫原扣堂紀錄；Reverse 必須關聯原 Consume。月票更正沒有堂數增減。
 - 已影響後續票券啟用者先列 `NeedsReview`，保存案件與原因，不提供一鍵退堂，也不先把舊票恢復為 Active；具體人工解決流程仍待討論。
@@ -1537,6 +1547,26 @@ GO
 - 兩張新表採邏輯關聯，不新增外鍵，沿用本文件的設計原則；應用服務須在交易中驗證學生、場次、出席、票券與原核銷的關聯一致性。
 - 識別欄位以 `nvarchar(50)` 保存使用者／操作者 ID，不保存電話、密碼或 token；正式 migration 前應核對 `users.usr_id` 及現有關聯欄位的實際型別、長度與定序。`SYSTEM` 僅供系統稽核來源，不能代替人工更正的真實 Admin 身分。
 - 所有 `datetime2(3)` 保存台灣本地的實際處理時間，格式如 `2026-10-15 14:30:05.125`，由後端共用 IClock 提供；不使用 DB 主機預設時間猜測時區。原場次／截止業務時間由場次及快照另保留，不把今天操作的時間偽裝為過去。
+
+### `dbo.sdt_presence_correction_log`：目前館內狀態人工更正稽核（2026-10-30 已建表）
+
+2026-10-30 已建表：此表只保存 Admin 現場確認後、從操作當下生效的館內／館外更正，來源固定標示為 `Manual`。它不是 `device_record`，不假造設備成功開門；與較新的真實成功進出事件依實際時間合併推導目前館內狀態。人工更正為在館內可作為 A 截止時的進場證據，A 採用時以 `corrected_at` 作 `chk_in_time`，並在出席列保存來源及 `correction_sn`；只從操作當下生效，不倒填較早的進場或回改已完成出席。人工進場沿用正常進場的課程、票券及額度規則；沒有可用票券而現場已在館內的異常情況，本輪暫不設計處理流程。跨日人工進場／館外更正的 2 個 SQL 整合案例已通過；實際設備與現場驗收尚未進行。
+
+**2026-10-30 跨日補充：** `CrossDay` 是查詢時推導的跨日待確認狀態，不新增出場事件或持久化的目前狀態欄。台灣午夜後，昨日最後有效進場且未見有效離場，只作 `CrossDay` 診斷；A 的今日出席判定僅採今日實際成功進出或今日人工更正，不沿用昨日進場。今日正常成功進場可重新建立今日狀態；Admin 現場確認仍在館內時，人工更正的 `before_presence` 記 `CrossDay`、`after_presence` 記 `Inside`，`corrected_at` 起才是今日有效進場。確認已在館外則可從 `CrossDay` 更正為 `Outside`。跨日判斷不阻擋已識別使用者離場，也不使票券變為 Ineligible。
+
+| 欄位 | 建議型別 | 用途 |
+| --- | --- | --- |
+| `correction_sn` | `bigint IDENTITY`，PK | 稽核流水號 |
+| `request_id` | `uniqueidentifier NOT NULL`，唯一 | 同一次人工送出及重試沿用的防重識別；不作裝置請求或授權憑證 |
+| `user_id` | `nvarchar(50) NOT NULL` | 被更正的學生 |
+| `attendance_sn` | `int NULL` | 若操作時仍在該堂追蹤期限內，記關聯出席流水號；期限外可為 NULL |
+| `before_presence` | `varchar(10) NOT NULL` | 更正前推導狀態：`Inside`、`Outside` 或 `CrossDay`；`CrossDay` 是昨日進場殘留待確認，並非實際出場 |
+| `after_presence` | `varchar(10) NOT NULL` | 更正後從操作當下生效的 `Inside` 或 `Outside`；不儲存 `CrossDay` 作操作目標 |
+| `reason` | `nvarchar(500) NOT NULL` | 必填的現場確認原因 |
+| `operator_id` | `nvarchar(50) NOT NULL` | 實際執行的 Admin |
+| `corrected_at` | `datetime2(3) NOT NULL` | 後端實際操作時間，台灣本地時間，不倒填歷史離場時間 |
+
+正式 migration 前需確認與現有館內狀態查詢的整合及並行鎖定；不得僅建表而讓畫面仍只查 `device_record`。人工進場若建立堂票暫占，與 Pending、人工紀錄在同一交易提交；月票不建暫占。期限內補登若同時更新該堂 `CheckOut`／離場時間，須和此稽核在同一交易提交；期限外補登只寫此稽核並更新目前館內狀態的查詢結果。`attendance_sn` 是本次操作直接處理的場次；一筆人工進場若供後續續堂採認，後續出席列可各自保存同一 `correction_sn` 作證據。
 
 ### `dbo.sdt_att_correction`：更正申請與處理進度
 
@@ -1707,7 +1737,7 @@ GO
 - 成功更正須將出席、占用釋放／恢復、額度、Consume／Reverse、出席稽核及案件完成標記放入一致的交易；正式送出前重驗最新狀態與歷史資格，不能只依畫面預覽結果執行。
 - 已影響接續票券、歷史依據不足及資料衝突，保存 NeedsReview 原因，不先做部分退堂或改啟用狀態；原已完成的扣堂也不透過背景工作整批重跑來更正。
 - 稽核新增與案件更新尚需統一寫入服務、並行鎖定、權限及測試；完整額度占用／工作進度表、館內狀態更正稽核和對帳機制仍屬後續設計範圍，不由本節兩張表取代。
-- 第一版正式入口為學生詳細頁，Schedule 不加入結算操作，獨立 Classes 列後續；Admin 確認並重新處理後須重驗，上一堂修復成功才依序恢復後續未完成工作。台灣午夜換日／當日重新確認只影響當日館內依據，歷史 A／B 仍依原場次歷史補跑；這些規則不代表本節已新增館內狀態或背景工作表。
+- 第一版學生詳細頁提供出席與結算進度及原因查閱；`NeedsReview` 由開發維運者依證據查證與處理 SQL 資料，不提供 Admin 通用恢復入口。修正來源資料本身不會自動重啟已停住的 A／B 工作；後續須核對 job、item、出席、占用與核銷是否一致，按實際原因處理未完成工作，不重做已完成扣堂。Schedule 不加入結算操作，獨立 Classes 列後續。台灣午夜換日／當日重新確認只影響當日館內依據，不把現在館內狀態代替歷史 A／B 證據。
 
 ## 課程出席背景工作資料設計（第四／第五階段）
 
@@ -1781,13 +1811,14 @@ GO
 | `first_started_at` | `datetime2(3)` | 是 | 此學生項目第一次實際開始時間 |
 | `last_started_at` | `datetime2(3)` | 是 | 最近一次實際嘗試時間 |
 | `completed_at` | `datetime2(3)` | 是 | Completed／Skipped 實際完成時間 |
-| `result_code` | `varchar(60)` | 是 | 成功、略過、暫停或異常代碼；不能只依 remark 判定狀態 |
-| `result_message` | `nvarchar(1000)` | 是 | 原因摘要；區分歷史不足、結算故障及票券不具資格 |
+| `result_code` | `varchar(60)` | 是 | 最新一次處理的成功、略過、暫停或異常代碼；查「目前為什麼待處理」先用此欄，不另建原因碼表或重試歷程表 |
+| `result_message` | `nvarchar(1000)` | 是 | 最新原因摘要，供學生詳細頁檢視；區分歷史不足、結算故障及票券不具資格，不存敏感技術例外內容 |
 | `created_at` | `datetime2(3)` | 否 | 項目建立時間 |
 | `updated_at` | `datetime2(3)` | 否 | 項目最近狀態變更時間 |
 
 - `Pending`／`Running`：尚未處理／正在父工作有效租約下處理。恢復時不得單憑 Running 就認定已扣堂，也不能直接再扣。
 - `Blocked`：同一學生前置工作未完成；保存阻擋項目，不能改成 Ineligible。前置修復後重新驗證，再恢復處理。
+- 2026-10-29 維運界線：`NeedsReview` 由開發維運者依 `result_code`／`result_message` 查證並直接處理必要的 SQL 資料，不提供 Admin 通用重試／強制完成入口。修正來源資料後，job 與 item 的 `NeedsReview` 不會自動恢復；重新處理前須核對已提交的出席、占用及 Consume，並注意嘗試次數與跨日限制，不能只將單一狀態欄位改回 `Pending` 或把未完成項目直接標為 `Completed`。此處描述維運責任與限制，不代表已提供安全的 SQL 恢復腳本。
 - `NeedsReview`：歷史不完整、Requested／Unknown 事件無法釐清、固定占用衝突等；不推測出席、不換票、不盲目重試。
 - `Failed`：暫時性技術錯誤，交易已回滾；保存原因及下次重試時間。超過技術重試上限後保留異常供人工處理。
 - `Completed`：該階段對該學生所需資料均已一致提交；A 確認缺票留館的出席事實也可完成，但票券資格另記 Ineligible，不能由此授予回場或允許扣堂。
@@ -1934,6 +1965,10 @@ GO
 
 2026-10-17 使用者決策：本占用表的 10 個 CHECK 全部移至程式驗證，保留 PK、idempotency_key 唯一限制及兩個 filtered unique index（有效出席占用／核銷），另保留查詢索引與欄位型別／NOT NULL。此決策只調整本占用表，不移除本文件其他資料表的 CHECK；已依此直接建立新表，沒有對 GymDB 執行 DROP CONSTRAINT。
 
+**2026-10-30 通用來源已部署：** 使用 `source_type varchar(24) NOT NULL` 加 `source_key varchar(64) NOT NULL` 取代原 `gate_request_id`／`processing_item_sn`，避免每增加一種建立占用的合法來源就再加一欄。來源種類固定為 `GateRequest`、`ClassWorkItem`、`ManualPresence`；來源鍵分別保存門禁 request GUID 的標準 36 字元格式、A 工作 item_sn 十進位字串、人工館內更正 correction_sn 十進位字串。程式依種類解析並驗證來源與同一學生、出席和場次一致；不以任意字串授權。`idempotency_key` 繼續負責同操作防重，來源欄位負責追溯，不互相代替。`previous_reservation_sn`、PK 與既有唯一索引保持原用途；沿用不新增外鍵及占用表 CHECK 的決策。
+
+已執行的[保留資料 migration](spec/IO_gyms/06-人工操作與異常處理/sql/01-manual-presence-and-generic-reservation-source.sql)先檢查舊來源欄位是否恰有一欄有值；切換前占用表為 0 筆。新版程式備妥且確認舊 API 未監聽後，在交易內新增新欄、回填及查核、改為必填，再移除舊欄。第一次正式執行及第一次回滾演練各因批次編譯與 SQL SET 選項失敗，複查均無部分變更；修正後回滾演練通過，正式執行 exit code 0，唯讀驗證新欄位／新表／唯一索引存在、舊欄位不存在。下方 2026-10-17 CREATE 僅是歷史語法，不應重跑。新版 API 程式仍需在實際環境啟動與驗收。
+
 - 程式由 `CreditReservationData.Validate()` 統一檢查數量、合法狀態、鍵、來源、自指、待確認原階段、固定／釋放／扣堂時間、核銷關聯及原因。`CreditReservation` 建立及每次狀態轉換都呼叫該驗證；Rehydrate 讀取既有資料時亦驗證，拒絕不合法狀態。
 - 新資料尚未分配 reservation_sn，程式無法事先比較新主鍵是否等於 previous_reservation_sn；未來 Repository 取得 INSERT 產生的 ID 後，須在交易提交前以該 ID 重新驗證。已有主鍵的資料在重建／寫入前直接驗證。
 - 未來 Repository 寫入前須驗證完整快照；匯入／批次應呼叫相同驗證。直接 SQL 將不再有這 10 個 CHECK 的防線；狀態字串解析不得對未知值預設成 Reserved。驗證失敗須拋錯並 rollback，不默默修正資料。
@@ -1948,8 +1983,10 @@ GO
 | `reservation_state` | `varchar(20)` | 否 | Reserved／Fixed／Released／Consumed／NeedsReview |
 | `review_from_state` | `varchar(20)` | 是 | NeedsReview 必填 Reserved 或 Fixed，保存原階段 |
 | `idempotency_key` | `varchar(160)` | 否 | 同操作重試沿用的唯一 ASCII 鍵，不得空白 |
-| `gate_request_id` | `uniqueidentifier` | 是 | 建立占用的進場請求 GUID |
-| `processing_item_sn` | `bigint` | 是 | A 建立／移轉占用的工作明細；與 gate_request_id 至少一個有值 |
+| `gate_request_id` | `uniqueidentifier` | — | 2026-10-30 前的歷史欄位，已移除 |
+| `processing_item_sn` | `bigint` | — | 2026-10-30 前的歷史欄位，已移除 |
+| `source_type` | `varchar(24) NOT NULL`（已部署） | 否 | `GateRequest`／`ClassWorkItem`／`ManualPresence`；來源類型由程式驗證 |
+| `source_key` | `varchar(64) NOT NULL`（已部署） | 否 | 與來源類型配對的標準 GUID 或十進位流水號；不存電話或自由文字 |
 | `previous_reservation_sn` | `bigint` | 是 | 前一筆已釋放占用，保留換票／返回歷史鏈 |
 | `usage_sn` | `int` | 是 | Consumed 時的正式核銷主鍵；其他狀態為 NULL |
 | `created_at` | `datetime2(3)` | 否 | 實際建立時間 |
@@ -1968,9 +2005,9 @@ GO
 - B 扣堂、核銷、占用轉 Consumed、必要生命週期／profile 及工作完成標記一起提交。唯一索引不能代替交易、核銷冪等及歷史資格驗證。
 - 本節只新增占用表；既有 sdt_att_record ALTER、兩張工作表建置及第五階段核銷防重須另行整合，不宣稱本 CREATE 可完成全部流程。
 
-### CREATE TABLE／索引語法：額度占用
+### 2026-10-17 已部署的 CREATE TABLE／索引語法：額度占用
 
-以下為完整 SQL 草稿中的表與索引定義；執行前仍需核對目標 schema。完整腳本會拒絕非 GymDB 或已有同名物件的情況，所有建表／索引在同一交易，失敗 rollback；不刪除或覆寫既有資料。
+以下保存當時建表與索引語法，供核對原始結構；不是 2026-10-30 通用來源 DDL，不應對現有表重跑 CREATE。原完整腳本會拒絕非 GymDB 或已有同名物件，建表／索引在同一交易，失敗 rollback；不刪除或覆寫既有資料。通用來源已由上方連結的 ALTER migration 套用。
 
 ```sql
 CREATE TABLE dbo.sdt_ticket_credit_reservation
